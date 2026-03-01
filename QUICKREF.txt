@@ -1,0 +1,58 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          CITYSIM QUICK REFERENCE                         ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║                                                                          ║
+║  CONTROLS                                                                ║
+║  ═══════════                                                             ║
+║  Arrow Keys .... Move cursor                                            ║
+║  SPACE ......... Place selected building/zone                           ║
+║  R ............. Select Residential zone                                ║
+║  C ............. Select Commercial zone                                 ║
+║  I ............. Select Industrial zone                                 ║
+║  D ............. Select Road                                            ║
+║  P ............. Select Park                                            ║
+║  H ............. View nearest Human                                     ║
+║  Z ............. Zoom to random Human                                   ║
+║  ESC ........... Quit (city view) / Return to city (human view)         ║
+║                                                                          ║
+║  BUILDING COSTS                                                          ║
+║  ═══════════════                                                         ║
+║  Residential ... $100      Police ....... $500                          ║
+║  Commercial .... $150      Fire ......... $500                          ║
+║  Industrial .... $200      Hospital ..... $1,000                        ║
+║  Road .......... $10       School ....... $800                          ║
+║  Park .......... $50       Power Plant .. $5,000                        ║
+║                             Water Pump .. $2,000                        ║
+║                                                                          ║
+║  GAME MECHANICS                                                          ║
+║  ═══════════════                                                         ║
+║  • All zones need power AND water to function                           ║
+║  • Power plants and water pumps serve 5-tile radius                     ║
+║  • Humans spawn in residential zones (with services)                    ║
+║  • Tax income: $5 per citizen every 24 game hours                       ║
+║  • Time: 1 real second ≈ 1 game hour                                    ║
+║                                                                          ║
+║  COLOUR CODING                                                           ║
+║  ══════════════                                                          ║
+║  Green ......... Grass (empty land)                                     ║
+║  Yellow ........ Residential zones                                      ║
+║  Light Blue .... Commercial zones                                       ║
+║  Brown ......... Industrial zones                                       ║
+║  Dark Grey ..... Roads                                                  ║
+║  Blue .......... Water                                                  ║
+║  Light Green ... Parks                                                  ║
+║  Red ........... Fire stations                                          ║
+║  Cyan .......... Police stations                                        ║
+║  White ......... Hospitals                                              ║
+║  Magenta ....... Schools                                                ║
+║                                                                          ║
+║  TIPS                                                                    ║
+║  ═════                                                                   ║
+║  1. Build power plant and water pump first                              ║
+║  2. Connect zones with roads for realism                                ║
+║  3. Mix residential near commercial for balance                         ║
+║  4. Parks increase citizen happiness                                    ║
+║  5. Watch your funds - don't overbuild!                                 ║
+║  6. Press H near populated areas to meet your citizens                  ║
+║                                                                          ║
+╚══════════════════════════════════════════════════════════════════════════╝
