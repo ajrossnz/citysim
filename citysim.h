@@ -136,6 +136,11 @@ typedef struct {
     unsigned char zoom_level;
 } GameState;
 
+/* Road/rail tile selection table entry */
+typedef struct { unsigned char art; unsigned char rot; } RoadTableEntry;
+extern const RoadTableEntry road_table[16];
+unsigned char neighbor_mask(GameState*, unsigned short, unsigned short, unsigned char);
+
 /* Function Prototypes */
 
 /* Graphics Functions */

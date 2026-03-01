@@ -26,7 +26,7 @@
 
 #define PANEL_LEFT_W     160
 #define PANEL_RIGHT_W    140
-#define STATUS_BAR_H     30
+#define STATUS_BAR_H     48
 #define TILE_LIST_ITEM_H 24
 
 #define INITIAL_W        1024
@@ -808,10 +808,10 @@ static void render(void)
                      180, 180, 180);
 
         /* Keyboard shortcuts hint */
-        draw_text_ui(8, win_h - STATUS_BAR_H + 22,
-                     "N:new D:draw F:fill C:clear Z:undo R:rename "
-                     "Del:delete Ctrl+S:save Q:quit",
-                     1, 100, 100, 100);
+        draw_text_ui(8, win_h - STATUS_BAR_H + 28,
+                     "N:new U:dup D:draw F:fill C:clr Z:undo "
+                     "R:ren Del ^S:save Q:quit",
+                     2, 100, 100, 100);
     }
 
     SDL_RenderPresent(renderer);
@@ -957,6 +957,22 @@ static int handle_events(void)
                 else if (ev.key.keysym.sym == SDLK_r) {
                     if (selected_tile >= 0)
                         begin_input(INPUT_RENAME);
+                }
+                else if (ev.key.keysym.sym == SDLK_u) {
+                    /* Duplicate current tile */
+                    if (selected_tile >= 0 && tile_count < MAX_TILES) {
+                        int src_idx = selected_tile;
+                        char dup_name[MAX_TILE_NAME];
+                        snprintf(dup_name, MAX_TILE_NAME, "%s_copy",
+                                 tiles[src_idx].name);
+                        if (create_tile(dup_name,
+                                        tiles[src_idx].units_w,
+                                        tiles[src_idx].units_h) >= 0) {
+                            memcpy(tiles[selected_tile].pixels,
+                                   tiles[src_idx].pixels,
+                                   sizeof(tiles[src_idx].pixels));
+                        }
+                    }
                 }
                 else if (ev.key.keysym.sym == SDLK_DELETE) {
                     if (selected_tile >= 0)

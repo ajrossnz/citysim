@@ -213,10 +213,29 @@ void update_humans(GameState* game) {
     }
 }
 
+/*
+ * Find the anchor (top-left, development==0) of a 3x3 zone given any
+ * tile within it.  Returns 1 and sets ax/ay on success, 0 on failure.
+ */
+static int find_zone_anchor(GameState *game, unsigned short x, unsigned short y,
+                            unsigned short *ax, unsigned short *ay) {
+    unsigned char dev = game->map[y][x].development;
+    int r = dev / 3;
+    int c = dev % 3;
+    if (x < c || y < r) return 0;
+    *ax = x - c;
+    *ay = y - r;
+    return 1;
+}
+
 void update_tile_services(GameState* game) {
-    int x, y, dx, dy;
-    int has_power, has_water;
-    
+    int x, y, dx, dy, r, c;
+    static unsigned int queue[4096];
+    int head, tail;
+    unsigned short qx, qy, nx, ny;
+    unsigned short ax, ay;
+    unsigned char t;
+
     /* Reset all services */
     for (y = 0; y < MAP_HEIGHT; y++) {
         for (x = 0; x < MAP_WIDTH; x++) {
@@ -224,24 +243,106 @@ void update_tile_services(GameState* game) {
             game->map[y][x].water = 0;
         }
     }
-    
-    /* Propagate power and water from sources */
+
+    /* --- Power: BFS through power lines from power plants --- */
+    head = 0;
+    tail = 0;
+
     for (y = 0; y < MAP_HEIGHT; y++) {
         for (x = 0; x < MAP_WIDTH; x++) {
-            if (game->map[y][x].type == TILE_POWER_PLANT) {
-                /* Power spreads to adjacent tiles */
-                for (dy = -5; dy <= 5; dy++) {
-                    for (dx = -5; dx <= 5; dx++) {
-                        if (y + dy >= 0 && y + dy < MAP_HEIGHT &&
-                            x + dx >= 0 && x + dx < MAP_WIDTH) {
-                            game->map[y + dy][x + dx].power = 1;
+            if (game->map[y][x].type == TILE_POWER_PLANT &&
+                game->map[y][x].development == 0) {
+                /* Mark all 9 plant tiles powered */
+                for (r = 0; r < 3; r++) {
+                    for (c = 0; c < 3; c++) {
+                        if (y + r < MAP_HEIGHT && x + c < MAP_WIDTH)
+                            game->map[y + r][x + c].power = 1;
+                    }
+                }
+                /* Enqueue adjacent power lines on the perimeter */
+                for (r = -1; r <= 3; r++) {
+                    for (c = -1; c <= 3; c++) {
+                        if (r >= 0 && r <= 2 && c >= 0 && c <= 2)
+                            continue;  /* skip interior */
+                        ny = y + r;
+                        nx = x + c;
+                        if (ny < MAP_HEIGHT && nx < MAP_WIDTH &&
+                            game->map[ny][nx].type == TILE_POWER_LINE &&
+                            !game->map[ny][nx].power &&
+                            tail < 4096) {
+                            game->map[ny][nx].power = 1;
+                            queue[tail++] = (unsigned int)ny * MAP_WIDTH + nx;
                         }
                     }
                 }
             }
-            
+        }
+    }
+
+    /* BFS through connected power lines */
+    while (head < tail) {
+        qy = (unsigned short)(queue[head] / MAP_WIDTH);
+        qx = (unsigned short)(queue[head] % MAP_WIDTH);
+        head++;
+
+        /* Check 4 neighbors */
+        for (dx = -1; dx <= 1; dx++) {
+            for (dy = -1; dy <= 1; dy++) {
+                if ((dx == 0) == (dy == 0)) continue;  /* only cardinal */
+                nx = qx + dx;
+                ny = qy + dy;
+                if (nx < MAP_WIDTH && ny < MAP_HEIGHT &&
+                    game->map[ny][nx].type == TILE_POWER_LINE &&
+                    !game->map[ny][nx].power &&
+                    tail < 4096) {
+                    game->map[ny][nx].power = 1;
+                    queue[tail++] = (unsigned int)ny * MAP_WIDTH + nx;
+                }
+            }
+        }
+    }
+
+    /* Post-BFS: powered power lines energise adjacent buildings */
+    for (y = 0; y < MAP_HEIGHT; y++) {
+        for (x = 0; x < MAP_WIDTH; x++) {
+            if (game->map[y][x].type == TILE_POWER_LINE &&
+                game->map[y][x].power) {
+                /* Check 4 cardinal neighbors */
+                for (dx = -1; dx <= 1; dx++) {
+                    for (dy = -1; dy <= 1; dy++) {
+                        if ((dx == 0) == (dy == 0)) continue;
+                        nx = x + dx;
+                        ny = y + dy;
+                        if (nx >= MAP_WIDTH || ny >= MAP_HEIGHT) continue;
+                        t = game->map[ny][nx].type;
+                        if (t == TILE_POWER_LINE || t == TILE_POWER_PLANT ||
+                            t == TILE_GRASS || t == TILE_ROAD || t == TILE_RAIL ||
+                            t == TILE_WATER)
+                            continue;
+                        /* It's a building/zone tile - power it */
+                        if (t == TILE_RESIDENTIAL || t == TILE_COMMERCIAL ||
+                            t == TILE_INDUSTRIAL) {
+                            /* 3x3 zone: find anchor and power all 9 */
+                            if (find_zone_anchor(game, nx, ny, &ax, &ay)) {
+                                for (r = 0; r < 3; r++)
+                                    for (c = 0; c < 3; c++)
+                                        if (ay + r < MAP_HEIGHT && ax + c < MAP_WIDTH)
+                                            game->map[ay + r][ax + c].power = 1;
+                            }
+                        } else {
+                            /* 1x1 building */
+                            game->map[ny][nx].power = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* --- Water: radius-based from water pumps --- */
+    for (y = 0; y < MAP_HEIGHT; y++) {
+        for (x = 0; x < MAP_WIDTH; x++) {
             if (game->map[y][x].type == TILE_WATER_PUMP) {
-                /* Water spreads to adjacent tiles */
                 for (dy = -5; dy <= 5; dy++) {
                     for (dx = -5; dx <= 5; dx++) {
                         if (y + dy >= 0 && y + dy < MAP_HEIGHT &&
@@ -257,7 +358,7 @@ void update_tile_services(GameState* game) {
 
 void update_buildings(GameState* game) {
     int x, y;
-    
+
     /* Update residential zones - only check top-left tile of each 3x3 block */
     for (y = 0; y < MAP_HEIGHT; y++) {
         for (x = 0; x < MAP_WIDTH; x++) {
@@ -273,6 +374,40 @@ void update_buildings(GameState* game) {
                             for (r = 0; r < 3; r++)
                                 for (c = 0; c < 3; c++)
                                     game->map[y+r][x+c].population = 1;
+                        }
+                    }
+                }
+            }
+
+            /* Population decay for unpowered zones */
+            if ((game->map[y][x].type == TILE_RESIDENTIAL ||
+                 game->map[y][x].type == TILE_COMMERCIAL ||
+                 game->map[y][x].type == TILE_INDUSTRIAL) &&
+                game->map[y][x].development == 0 &&
+                game->map[y][x].population > 0 &&
+                !game->map[y][x].power) {
+                if (rand_range(0, 2880) == 0) {
+                    int r, c;
+                    unsigned int i;
+                    /* Clear population on all 9 tiles */
+                    for (r = 0; r < 3; r++)
+                        for (c = 0; c < 3; c++)
+                            if (y + r < MAP_HEIGHT && x + c < MAP_WIDTH)
+                                game->map[y+r][x+c].population = 0;
+                    /* Remove humans whose home is within this 3x3 block */
+                    i = 0;
+                    while (i < game->num_humans) {
+                        if (game->humans[i].home_x >= x &&
+                            game->humans[i].home_x < x + 3 &&
+                            game->humans[i].home_y >= y &&
+                            game->humans[i].home_y < y + 3) {
+                            /* Swap-remove */
+                            game->num_humans--;
+                            game->population--;
+                            if (i < game->num_humans)
+                                game->humans[i] = game->humans[game->num_humans];
+                        } else {
+                            i++;
                         }
                     }
                 }
@@ -314,9 +449,9 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
     if (x >= MAP_WIDTH || y >= MAP_HEIGHT)
         return;
 
-    /* 3x3 zone types: residential, commercial, industrial */
+    /* 3x3 zone/building types */
     if (type == TILE_RESIDENTIAL || type == TILE_COMMERCIAL ||
-        type == TILE_INDUSTRIAL) {
+        type == TILE_INDUSTRIAL || type == TILE_POWER_PLANT) {
         int r, c;
         unsigned short bx, by;
 
@@ -324,16 +459,12 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
         if (x < 1 || y < 1 || x + 1 >= MAP_WIDTH || y + 1 >= MAP_HEIGHT)
             return;
 
-        /* Check all 9 cells are buildable (not water, not already zoned) */
+        /* Check all 9 cells are empty grass */
         for (r = -1; r <= 1; r++) {
             for (c = -1; c <= 1; c++) {
                 by = y + r;
                 bx = x + c;
-                if (game->map[by][bx].type == TILE_WATER)
-                    return;
-                if (game->map[by][bx].type == TILE_RESIDENTIAL ||
-                    game->map[by][bx].type == TILE_COMMERCIAL ||
-                    game->map[by][bx].type == TILE_INDUSTRIAL)
+                if (game->map[by][bx].type != TILE_GRASS)
                     return;
             }
         }
@@ -355,8 +486,29 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
         return;
     }
 
-    /* Don't build on water */
-    if (game->map[y][x].type == TILE_WATER && type != TILE_WATER)
+    /* Power line: can overlay grass, straight roads, and rail */
+    if (type == TILE_POWER_LINE) {
+        unsigned char existing = game->map[y][x].type;
+
+        if (existing == TILE_ROAD) {
+            unsigned char mask = neighbor_mask(game, x, y, TILE_ROAD);
+            if (road_table[mask].art == 2)
+                return;  /* reject turns */
+        } else if (existing != TILE_GRASS && existing != TILE_RAIL) {
+            return;  /* reject everything else */
+        }
+
+        cost = get_tile_cost(type);
+        if (game->funds < cost)
+            return;
+        game->funds -= cost;
+        game->map[y][x].type = TILE_POWER_LINE;
+        game->map[y][x].development = (existing == TILE_GRASS) ? 0 : existing;
+        return;
+    }
+
+    /* Only build on empty grass */
+    if (game->map[y][x].type != TILE_GRASS)
         return;
 
     cost = get_tile_cost(type);
@@ -486,6 +638,14 @@ void handle_input(GameState* game) {
             case 't':
             case 'T':
                 game->current_tool = TILE_RAIL;
+                break;
+            case 'g':
+            case 'G':
+                game->current_tool = TILE_POWER_PLANT;
+                break;
+            case 'l':
+            case 'L':
+                game->current_tool = TILE_POWER_LINE;
                 break;
             case 'h':
             case 'H':

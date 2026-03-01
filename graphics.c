@@ -568,9 +568,9 @@ static void rotate_tile(const unsigned char src[16][16],
  * Compute a 4-bit neighbor bitmask for same-type tiles.
  * N=1, S=2, E=4, W=8
  */
-static unsigned char neighbor_mask(GameState *game,
-                                   unsigned short mx, unsigned short my,
-                                   unsigned char tile_type) {
+unsigned char neighbor_mask(GameState *game,
+                           unsigned short mx, unsigned short my,
+                           unsigned char tile_type) {
     unsigned char mask = 0;
     if (my > 0 && game->map[my - 1][mx].type == tile_type)
         mask |= 1;  /* N */
@@ -587,7 +587,7 @@ static unsigned char neighbor_mask(GameState *game,
  * Road tile selection table, indexed by neighbor bitmask.
  * art: 0=horiz, 1=vert, 2=turn.  rot: rotation (0-3).
  */
-static const struct { unsigned char art; unsigned char rot; } road_table[16] = {
+const RoadTableEntry road_table[16] = {
     {0, 0}, /* 0:  isolated  -> horiz */
     {1, 0}, /* 1:  N         -> vert */
     {1, 0}, /* 2:  S         -> vert */
@@ -605,6 +605,82 @@ static const struct { unsigned char art; unsigned char rot; } road_table[16] = {
     {0, 0}, /* 14: S+E+W     -> horiz (no T) */
     {0, 0}, /* 15: all       -> horiz (no cross) */
 };
+
+/*
+ * Extended road neighbor mask: treats TILE_ROAD and power-line-on-road
+ * as road neighbors, so roads visually connect to power-line overlays.
+ */
+static unsigned char road_neighbor_mask_ext(GameState *game,
+                                            unsigned short mx,
+                                            unsigned short my) {
+    unsigned char mask = 0;
+    unsigned char t;
+    if (my > 0) {
+        t = game->map[my - 1][mx].type;
+        if (t == TILE_ROAD ||
+            (t == TILE_POWER_LINE && game->map[my - 1][mx].development == TILE_ROAD))
+            mask |= 1;
+    }
+    if (my + 1 < MAP_HEIGHT) {
+        t = game->map[my + 1][mx].type;
+        if (t == TILE_ROAD ||
+            (t == TILE_POWER_LINE && game->map[my + 1][mx].development == TILE_ROAD))
+            mask |= 2;
+    }
+    if (mx + 1 < MAP_WIDTH) {
+        t = game->map[my][mx + 1].type;
+        if (t == TILE_ROAD ||
+            (t == TILE_POWER_LINE && game->map[my][mx + 1].development == TILE_ROAD))
+            mask |= 4;
+    }
+    if (mx > 0) {
+        t = game->map[my][mx - 1].type;
+        if (t == TILE_ROAD ||
+            (t == TILE_POWER_LINE && game->map[my][mx - 1].development == TILE_ROAD))
+            mask |= 8;
+    }
+    return mask;
+}
+
+/*
+ * Composite two 16x16 tiles: overlay non-zero pixels over base.
+ */
+static void composite_tiles(const unsigned char base[16][16],
+                            const unsigned char overlay[16][16],
+                            unsigned char out[16][16]) {
+    int y, x;
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < 16; x++)
+            out[y][x] = overlay[y][x] ? overlay[y][x] : base[y][x];
+}
+
+/*
+ * Neighbor mask for power lines: counts adjacent TILE_POWER_LINE tiles
+ * and TILE_POWER_PLANT tiles (any sub-position) as neighbors.
+ */
+static unsigned char powerline_neighbor_mask(GameState *game,
+                                             unsigned short mx,
+                                             unsigned short my) {
+    unsigned char mask = 0;
+    unsigned char t;
+    if (my > 0) {
+        t = game->map[my - 1][mx].type;
+        if (t == TILE_POWER_LINE || t == TILE_POWER_PLANT) mask |= 1;
+    }
+    if (my + 1 < MAP_HEIGHT) {
+        t = game->map[my + 1][mx].type;
+        if (t == TILE_POWER_LINE || t == TILE_POWER_PLANT) mask |= 2;
+    }
+    if (mx + 1 < MAP_WIDTH) {
+        t = game->map[my][mx + 1].type;
+        if (t == TILE_POWER_LINE || t == TILE_POWER_PLANT) mask |= 4;
+    }
+    if (mx > 0) {
+        t = game->map[my][mx - 1].type;
+        if (t == TILE_POWER_LINE || t == TILE_POWER_PLANT) mask |= 8;
+    }
+    return mask;
+}
 
 /*
  * Extract a 16x16 sub-tile from a larger tile art array and draw it.
@@ -638,6 +714,17 @@ void draw_tile_in_context(int screen_x, int screen_y,
     unsigned char tile_type = game->map[map_y][map_x].type;
     unsigned char mask;
 
+    /* 3x3 power plant: draw from powercoal art */
+    if (tile_type == TILE_POWER_PLANT) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        int sub_row = subpos / 3;
+        int sub_col = subpos % 3;
+        draw_multitile_sub(screen_x, screen_y,
+                           &tile_powercoal[0][0], 48,
+                           sub_row, sub_col);
+        return;
+    }
+
     /* 3x3 residential zone: select art based on population state */
     if (tile_type == TILE_RESIDENTIAL) {
         unsigned char subpos = game->map[map_y][map_x].development;
@@ -657,12 +744,46 @@ void draw_tile_in_context(int screen_x, int screen_y,
         return;
     }
 
+    /* 3x3 commercial zone: select art based on population state */
+    if (tile_type == TILE_COMMERCIAL) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        int sub_row = subpos / 3;
+        int sub_col = subpos % 3;
+
+        if (game->map[map_y][map_x].population == 0) {
+            draw_multitile_sub(screen_x, screen_y,
+                               &tile_comunpop[0][0], 48,
+                               sub_row, sub_col);
+        } else {
+            draw_filled_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE,
+                             COLOR_BLUE);
+        }
+        return;
+    }
+
+    /* 3x3 industrial zone: select art based on population state */
+    if (tile_type == TILE_INDUSTRIAL) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        int sub_row = subpos / 3;
+        int sub_col = subpos % 3;
+
+        if (game->map[map_y][map_x].population == 0) {
+            draw_multitile_sub(screen_x, screen_y,
+                               &tile_indunpop[0][0], 48,
+                               sub_row, sub_col);
+        } else {
+            draw_filled_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE,
+                             COLOR_BROWN);
+        }
+        return;
+    }
+
     if (tile_type == TILE_ROAD) {
         TileArt art;
         unsigned char rot;
         unsigned char entry_art;
 
-        mask = neighbor_mask(game, map_x, map_y, TILE_ROAD);
+        mask = road_neighbor_mask_ext(game, map_x, map_y);
         entry_art = road_table[mask].art;
         rot = road_table[mask].rot;
 
@@ -677,6 +798,65 @@ void draw_tile_in_context(int screen_x, int screen_y,
             rotate_tile((const unsigned char (*)[16])art, buf, rot);
             draw_tile_pixels(screen_x, screen_y,
                              (const unsigned char (*)[16])buf);
+        }
+        return;
+    }
+
+    if (tile_type == TILE_POWER_LINE) {
+        unsigned char dev = game->map[map_y][map_x].development;
+        unsigned char pl_mask = powerline_neighbor_mask(game, map_x, map_y);
+        unsigned char pl_rot = 0;
+        unsigned char pl_buf[16][16];
+
+        /* Determine orientation: vertical if N/S neighbors only */
+        if ((pl_mask & 3) && !(pl_mask & 12))
+            pl_rot = 1;  /* vertical: rotate 90 */
+
+        if (dev == TILE_ROAD || dev == TILE_RAIL) {
+            /* Overlay on road or rail: draw base first, composite */
+            unsigned char base[16][16];
+            unsigned char overlay[16][16];
+            unsigned char comp[16][16];
+
+            if (dev == TILE_ROAD) {
+                unsigned char rd_mask = road_neighbor_mask_ext(game, map_x, map_y);
+                unsigned char rd_art = road_table[rd_mask].art;
+                unsigned char rd_rot = road_table[rd_mask].rot;
+                TileArt rd_src;
+
+                if (rd_art == 0) rd_src = tile_roadhoriz;
+                else if (rd_art == 1) rd_src = tile_roadvert;
+                else rd_src = tile_roadturn;
+
+                if (rd_rot == 0)
+                    memcpy(base, rd_src, 256);
+                else
+                    rotate_tile((const unsigned char (*)[16])rd_src, base, rd_rot);
+            } else {
+                /* Rail */
+                unsigned char rl_mask = neighbor_mask(game, map_x, map_y, TILE_RAIL);
+                if ((rl_mask & 12) && !(rl_mask & 3))
+                    rotate_tile(tile_rail1, base, 1);
+                else
+                    memcpy(base, tile_rail1, 256);
+            }
+
+            if (pl_rot == 0)
+                memcpy(overlay, tile_powerline, 256);
+            else
+                rotate_tile(tile_powerline, overlay, pl_rot);
+
+            composite_tiles(base, overlay, comp);
+            draw_tile_pixels(screen_x, screen_y, (const unsigned char (*)[16])comp);
+        } else {
+            /* Standalone power line on grass */
+            if (pl_rot == 0) {
+                draw_tile_pixels(screen_x, screen_y, tile_powerline);
+            } else {
+                rotate_tile(tile_powerline, pl_buf, pl_rot);
+                draw_tile_pixels(screen_x, screen_y,
+                                 (const unsigned char (*)[16])pl_buf);
+            }
         }
         return;
     }
@@ -894,6 +1074,14 @@ void draw_help_screen(void) {
 
     draw_filled_rect(20, y + 2, 12, 12, COLOR_LIGHT_GREEN);
     draw_text(38, y, "P - Park        $50", COLOR_WHITE);
+    y += 20;
+
+    draw_filled_rect(20, y + 2, 12, 12, COLOR_BROWN);
+    draw_text(38, y, "T - Rail        $20", COLOR_WHITE);
+    y += 20;
+
+    draw_filled_rect(20, y + 2, 12, 12, COLOR_LIGHT_GRAY);
+    draw_text(38, y, "L - Power Line  $5", COLOR_WHITE);
 
     /* Infrastructure - right column */
     y = 30;
@@ -901,7 +1089,7 @@ void draw_help_screen(void) {
     y += 20;
 
     draw_filled_rect(340, y + 2, 12, 12, COLOR_LIGHT_RED);
-    draw_text(358, y, "Power Plant $5000", COLOR_WHITE);
+    draw_text(358, y, "G - Power Plant $5000", COLOR_WHITE);
     y += 20;
 
     draw_filled_rect(340, y + 2, 12, 12, COLOR_LIGHT_CYAN);
