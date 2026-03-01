@@ -304,24 +304,170 @@ static const unsigned char font_data[96][7] = {
     {0x00,0x00,0x08,0x15,0x02,0x00,0x00}, /* ~ */
 };
 
+/*
+ * Fast draw_char using Set/Reset mode.  EGA registers are set up once,
+ * then each font row is expanded to a 10-bit pattern (2x horizontal
+ * scale), placed into byte-aligned positions, and written with a single
+ * Bit Mask change per byte.  ~90 port I/O ops vs ~700 for the old
+ * per-pixel draw_filled_rect approach.
+ */
 void draw_char(int x, int y, char c, unsigned char color) {
-    int i, j;
-    unsigned char row;
-    int char_index;
+    volatile unsigned char *video = (volatile unsigned char *)0xA0000;
+    int char_index, i, j;
+    int base_byte, bit_off;
 
     if (c < 32 || c > 126)
         return;
-
     char_index = c - 32;
+    base_byte = x / 8;
+    bit_off = x % 8;
 
-    /* Draw at 2x scale: each font pixel becomes a 2x2 block */
+    /* Write mode 0, Set/Reset enabled for all planes */
+    outp(0x3CE, 0x05); outp(0x3CF, 0x00);
+    outp(0x3CE, 0x01); outp(0x3CF, 0x0F);
+    outp(0x3CE, 0x00); outp(0x3CF, color);
+
     for (i = 0; i < 7; i++) {
-        row = font_data[char_index][i];
+        unsigned char glyph = font_data[char_index][i];
+        unsigned short fg_bits = 0;
+        unsigned long fg_placed;
+        unsigned char fb[3];
+        int sy = y + i * 2;
+        int off0 = sy * 80 + base_byte;
+        int off1 = off0 + 80;
+        int b;
+
+        /* Expand 5-bit glyph row to 10-bit pattern (2x scale) */
         for (j = 0; j < 5; j++) {
-            if (row & (0x10 >> j)) {
-                draw_filled_rect(x + j * 2, y + i * 2, 2, 2, color);
+            if (glyph & (0x10 >> j))
+                fg_bits |= (unsigned short)(3 << (8 - j * 2));
+        }
+
+        /* Place 10-bit pattern into 3-byte span at bit_off */
+        fg_placed = (unsigned long)fg_bits << (14 - bit_off);
+        fb[0] = (unsigned char)(fg_placed >> 16);
+        fb[1] = (unsigned char)(fg_placed >> 8);
+        fb[2] = (unsigned char)(fg_placed);
+
+        for (b = 0; b < 3; b++) {
+            if (fb[b] == 0) continue;
+            outp(0x3CE, 0x08);
+            outp(0x3CF, fb[b]);
+            /* Latch read + Set/Reset write for both scanlines (2x vert) */
+            video[off0 + b] = video[off0 + b];
+            video[off0 + b] = 0xFF;
+            video[off1 + b] = video[off1 + b];
+            video[off1 + b] = 0xFF;
+        }
+    }
+
+    /* Restore defaults */
+    outp(0x3CE, 0x01); outp(0x3CF, 0x00);
+    outp(0x3CE, 0x08); outp(0x3CF, 0xFF);
+}
+
+/*
+ * Draw a character with a background colour in a single pass per plane.
+ * Each 12x14 pixel cell (10px glyph + 2px gap, 7 font rows x 2 vscale)
+ * is written without any visible flicker: for each plane, every pixel
+ * in the cell is set to either the foreground or background plane bit
+ * in one read-modify-write per byte.
+ */
+static void draw_char_bg(int x, int y, char c,
+                          unsigned char fg, unsigned char bg) {
+    volatile unsigned char *video = (volatile unsigned char *)0xA0000;
+    int char_index, plane, i, j, b;
+    int base_byte, bit_off;
+    unsigned long cell_placed;
+    unsigned char cmask[3]; /* cell-occupancy mask per byte */
+
+    if (c < 32 || c > 126) c = ' ';
+    char_index = c - 32;
+    base_byte = x / 8;
+    bit_off = x % 8;
+
+    /* 12-pixel cell mask placed into byte positions */
+    cell_placed = (unsigned long)0xFFF << (12 - bit_off);
+    cmask[0] = (unsigned char)(cell_placed >> 16);
+    cmask[1] = (unsigned char)(cell_placed >> 8);
+    cmask[2] = (unsigned char)(cell_placed);
+
+    /* Direct plane writes — no Set/Reset */
+    outp(0x3CE, 0x05); outp(0x3CF, 0x00);  /* Write mode 0 */
+    outp(0x3CE, 0x01); outp(0x3CF, 0x00);  /* Disable Set/Reset */
+    outp(0x3CE, 0x08); outp(0x3CF, 0xFF);  /* Full bit mask */
+
+    for (plane = 0; plane < 4; plane++) {
+        unsigned char fg_bit = (fg >> plane) & 1;
+        unsigned char bg_bit = (bg >> plane) & 1;
+
+        outp(0x3CE, 0x04); outp(0x3CF, (unsigned char)plane);  /* Read plane */
+        outp(0x3C4, 0x02); outp(0x3C5, (unsigned char)(1 << plane)); /* Write plane */
+
+        for (i = 0; i < 7; i++) {
+            unsigned char glyph = font_data[char_index][i];
+            unsigned short fg_pattern = 0;
+            unsigned long fg_placed_l;
+            unsigned char fmask[3], pval[3];
+            int sy, off0, off1;
+
+            for (j = 0; j < 5; j++) {
+                if (glyph & (0x10 >> j))
+                    fg_pattern |= (unsigned short)(3 << (8 - j * 2));
+            }
+
+            fg_placed_l = (unsigned long)fg_pattern << (14 - bit_off);
+            fmask[0] = (unsigned char)(fg_placed_l >> 16);
+            fmask[1] = (unsigned char)(fg_placed_l >> 8);
+            fmask[2] = (unsigned char)(fg_placed_l);
+
+            /* Plane value for each byte: fg pixels get fg_bit, bg pixels get bg_bit */
+            for (b = 0; b < 3; b++) {
+                if (fg_bit && bg_bit)
+                    pval[b] = cmask[b];
+                else if (!fg_bit && !bg_bit)
+                    pval[b] = 0;
+                else if (fg_bit)
+                    pval[b] = fmask[b];
+                else
+                    pval[b] = cmask[b] & ~fmask[b];
+            }
+
+            sy = y + i * 2;
+            off0 = sy * 80 + base_byte;
+            off1 = off0 + 80;
+
+            for (b = 0; b < 3; b++) {
+                if (cmask[b]) {
+                    unsigned char v;
+                    v = video[off0 + b];
+                    video[off0 + b] = (v & ~cmask[b]) | pval[b];
+                    v = video[off1 + b];
+                    video[off1 + b] = (v & ~cmask[b]) | pval[b];
+                }
             }
         }
+    }
+
+    /* Restore: all planes writable */
+    outp(0x3C4, 0x02); outp(0x3C5, 0x0F);
+}
+
+/*
+ * Draw a fixed-width text field with a background colour.
+ * Draws exactly field_chars characters, padding short strings with spaces.
+ * Each character cell is written atomically (no flicker).
+ */
+static void draw_text_bg(int x, int y, const char *text,
+                          int field_chars,
+                          unsigned char fg, unsigned char bg) {
+    int i;
+    int len;
+
+    for (len = 0; text[len]; len++) {}
+
+    for (i = 0; i < field_chars; i++) {
+        draw_char_bg(x + i * 12, y, i < len ? text[i] : ' ', fg, bg);
     }
 }
 
@@ -801,47 +947,42 @@ void draw_help_screen(void) {
 void draw_ui(GameState* game) {
     /* 2x font: chars are 10x14px, 12px spacing. Bar is y=320-349 (30px). */
     int bar_y = 328;  /* Center 14px text in 30px bar */
+    char buf[20];
 
-    /* Clear entire status bar area */
-    draw_filled_rect(0, 320, SCREEN_WIDTH, 30, COLOR_BLACK);
-
-    /* Separator line */
+    /* Separator line — cheap single-row rect, always redrawn */
     draw_filled_rect(0, 320, SCREEN_WIDTH, 1, COLOR_DARK_GRAY);
 
-    /* Money: "$50000" */
-    draw_text(2, bar_y, "$", COLOR_YELLOW);
-    draw_number(14, bar_y, game->funds, COLOR_YELLOW);
+    /* Each field uses draw_text_bg with a fixed width, so stale digits
+       are overwritten with background — no blanket clear, no flicker. */
 
-    /* Population: "Pop:0" */
-    draw_text(120, bar_y, "Pop:", COLOR_WHITE);
-    draw_number(168, bar_y, (long)game->population, COLOR_WHITE);
+    /* Money: "$50000" — 9 chars max */
+    sprintf(buf, "$%ld", game->funds);
+    draw_text_bg(2, bar_y, buf, 9, COLOR_YELLOW, COLOR_BLACK);
 
-    /* Day */
-    draw_text(230, bar_y, "Day:", COLOR_LIGHT_CYAN);
-    draw_number(278, bar_y, (long)game->game_day, COLOR_LIGHT_CYAN);
+    /* Population — 9 chars max */
+    sprintf(buf, "Pop:%u", (unsigned)game->population);
+    draw_text_bg(120, bar_y, buf, 9, COLOR_WHITE, COLOR_BLACK);
 
-    /* Time (HH:00) */
-    {
-        char time_buf[8];
-        sprintf(time_buf, "%02u:00", game->game_time % 24);
-        draw_text(340, bar_y, time_buf, COLOR_LIGHT_CYAN);
-    }
+    /* Day — 8 chars max */
+    sprintf(buf, "Day:%u", (unsigned)game->game_day);
+    draw_text_bg(230, bar_y, buf, 8, COLOR_LIGHT_CYAN, COLOR_BLACK);
 
-    /* Current tool name or zoom indicator */
+    /* Time (HH:00) — 5 chars */
+    sprintf(buf, "%02u:00", game->game_time % 24);
+    draw_text_bg(340, bar_y, buf, 5, COLOR_LIGHT_CYAN, COLOR_BLACK);
+
+    /* Current tool name or zoom indicator — 11 chars max */
     if (game->zoom_level > 0) {
-        char zoom_buf[10];
-        sprintf(zoom_buf, "ZOOM %dx", 1 << game->zoom_level);
-        draw_text(420, bar_y, zoom_buf, COLOR_LIGHT_MAGENTA);
+        sprintf(buf, "ZOOM %dx", 1 << game->zoom_level);
+        draw_text_bg(420, bar_y, buf, 11, COLOR_LIGHT_MAGENTA, COLOR_BLACK);
     } else {
-        draw_text(420, bar_y, get_tile_name(game->current_tool), COLOR_LIGHT_GREEN);
+        draw_text_bg(420, bar_y, get_tile_name(game->current_tool),
+                     11, COLOR_LIGHT_GREEN, COLOR_BLACK);
     }
 
-    /* Coordinates */
-    {
-        char coord_buf[12];
-        sprintf(coord_buf, "%u,%u", (unsigned)game->cursor_x, (unsigned)game->cursor_y);
-        draw_text(548, bar_y, coord_buf, COLOR_LIGHT_GRAY);
-    }
+    /* Coordinates — 8 chars max */
+    sprintf(buf, "%u,%u", (unsigned)game->cursor_x, (unsigned)game->cursor_y);
+    draw_text_bg(548, bar_y, buf, 8, COLOR_LIGHT_GRAY, COLOR_BLACK);
 }
 
 void draw_human_view(GameState* game) {

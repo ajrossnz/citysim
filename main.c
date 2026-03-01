@@ -62,6 +62,9 @@ int main(void) {
                     draw_map(&game);
                 }
                 draw_cursor(&game);
+                /* Clear status bar area on full redraw (returning from
+                   help/human view leaves stale pixels) */
+                draw_filled_rect(0, 320, SCREEN_WIDTH, 30, COLOR_BLACK);
                 draw_ui(&game);
                 first_render = 0;
                 needs_ui_update = 0;
