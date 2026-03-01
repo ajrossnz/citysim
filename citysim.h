@@ -133,6 +133,7 @@ typedef struct {
     unsigned char current_tool;
     unsigned char game_state;
     unsigned char selected_human;
+    unsigned char zoom_level;
 } GameState;
 
 /* Function Prototypes */
@@ -144,6 +145,7 @@ void set_pixel(int x, int y, unsigned char color);
 void draw_tile(int screen_x, int screen_y, unsigned char tile_type);
 void draw_map(GameState* game);
 void draw_single_tile(GameState* game, unsigned short map_x, unsigned short map_y);
+void draw_tile_in_context(int screen_x, int screen_y, GameState* game, unsigned short map_x, unsigned short map_y);
 void draw_cursor(GameState* game);
 void draw_ui(GameState* game);
 void draw_human_view(GameState* game);
@@ -154,6 +156,8 @@ void draw_text(int x, int y, const char* text, unsigned char color);
 void draw_number(int x, int y, long num, unsigned char color);
 void draw_char(int x, int y, char c, unsigned char color);
 void draw_help_screen(void);
+unsigned char get_tile_color(unsigned char tile_type);
+void draw_map_zoomed(GameState* game);
 
 /* Game Logic Functions */
 void init_game(GameState* game);

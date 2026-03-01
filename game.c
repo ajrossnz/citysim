@@ -93,12 +93,6 @@ void init_game(GameState* game) {
         }
     }
     
-    /* Add some water (river running through center area) */
-    for (x = 0; x < MAP_WIDTH; x++) {
-        game->map[280][x].type = TILE_WATER;
-        game->map[281][x].type = TILE_WATER;
-    }
-
     /* Starting funds */
     game->funds = 50000;
     game->game_time = 8;  /* Start at 8 AM */
@@ -111,26 +105,6 @@ void init_game(GameState* game) {
     /* Center scroll on cursor */
     game->scroll_x = game->cursor_x - VIEW_TILES_X / 2;
     game->scroll_y = game->cursor_y - VIEW_TILES_Y / 2;
-
-    /* Place starter infrastructure centered around (256,256) */
-    place_tile(game, 256, 250, TILE_POWER_PLANT);
-    place_tile(game, 256, 265, TILE_WATER_PUMP);
-
-    /* Place some starter roads */
-    for (x = 244; x < 269; x++) {
-        place_tile(game, x, 255, TILE_ROAD);
-    }
-
-    /* Add some starter buildings for visibility */
-    for (x = 246; x < 251; x++) {
-        place_tile(game, x, 253, TILE_RESIDENTIAL);
-        place_tile(game, x, 257, TILE_COMMERCIAL);
-    }
-    for (x = 254; x < 259; x++) {
-        place_tile(game, x, 253, TILE_INDUSTRIAL);
-    }
-    place_tile(game, 252, 253, TILE_PARK);
-    place_tile(game, 252, 257, TILE_POLICE);
 }
 
 void spawn_human(GameState* game, unsigned short x, unsigned short y) {
@@ -284,17 +258,22 @@ void update_tile_services(GameState* game) {
 void update_buildings(GameState* game) {
     int x, y;
     
-    /* Update residential zones */
+    /* Update residential zones - only check top-left tile of each 3x3 block */
     for (y = 0; y < MAP_HEIGHT; y++) {
         for (x = 0; x < MAP_WIDTH; x++) {
-            if (game->map[y][x].type == TILE_RESIDENTIAL) {
+            if (game->map[y][x].type == TILE_RESIDENTIAL &&
+                game->map[y][x].development == 0) {
                 /* Spawn humans in residential zones with power and water */
                 if (game->map[y][x].power && game->map[y][x].water) {
                     if (rand_range(0, 1000) < 2 && game->num_humans < MAX_HUMANS) {
-                        spawn_human(game, x, y);
-                    }
-                    if (game->map[y][x].development < 100) {
-                        game->map[y][x].development++;
+                        spawn_human(game, x + 1, y + 1);
+                        /* Mark all 9 tiles as populated */
+                        if (y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
+                            int r, c;
+                            for (r = 0; r < 3; r++)
+                                for (c = 0; c < 3; c++)
+                                    game->map[y+r][x+c].population = 1;
+                        }
                     }
                 }
             }
@@ -331,22 +310,63 @@ void update_game(GameState* game) {
 
 void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned char type) {
     int cost;
-    
+
     if (x >= MAP_WIDTH || y >= MAP_HEIGHT)
         return;
-    
+
+    /* 3x3 zone types: residential, commercial, industrial */
+    if (type == TILE_RESIDENTIAL || type == TILE_COMMERCIAL ||
+        type == TILE_INDUSTRIAL) {
+        int r, c;
+        unsigned short bx, by;
+
+        /* Block is centered on cursor: top-left = (x-1, y-1) */
+        if (x < 1 || y < 1 || x + 1 >= MAP_WIDTH || y + 1 >= MAP_HEIGHT)
+            return;
+
+        /* Check all 9 cells are buildable (not water, not already zoned) */
+        for (r = -1; r <= 1; r++) {
+            for (c = -1; c <= 1; c++) {
+                by = y + r;
+                bx = x + c;
+                if (game->map[by][bx].type == TILE_WATER)
+                    return;
+                if (game->map[by][bx].type == TILE_RESIDENTIAL ||
+                    game->map[by][bx].type == TILE_COMMERCIAL ||
+                    game->map[by][bx].type == TILE_INDUSTRIAL)
+                    return;
+            }
+        }
+
+        cost = get_tile_cost(type);
+        if (game->funds < cost)
+            return;
+        game->funds -= cost;
+
+        /* Place all 9 tiles; development = sub-position (row*3 + col) */
+        for (r = 0; r < 3; r++) {
+            for (c = 0; c < 3; c++) {
+                by = y - 1 + r;
+                bx = x - 1 + c;
+                game->map[by][bx].type = type;
+                game->map[by][bx].development = (unsigned char)(r * 3 + c);
+            }
+        }
+        return;
+    }
+
     /* Don't build on water */
     if (game->map[y][x].type == TILE_WATER && type != TILE_WATER)
         return;
-    
+
     cost = get_tile_cost(type);
-    
+
     if (game->funds < cost)
         return;
-    
+
     game->funds -= cost;
     game->map[y][x].type = type;
-    
+
     if (type >= TILE_POLICE && type <= TILE_WATER_PUMP) {
         if (game->num_buildings < MAX_BUILDINGS) {
             game->buildings[game->num_buildings].type = type;
@@ -362,18 +382,46 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
     }
 }
 
+/* Recentre scroll around cursor for the current zoom level */
+static void recentre_scroll(GameState* game) {
+    int tile_px, vtx, vty;
+
+    tile_px = 16 >> game->zoom_level;
+    vtx = 640 / tile_px;
+    vty = 320 / tile_px;
+    if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
+    if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
+
+    game->scroll_x = (game->cursor_x > (unsigned)(vtx / 2))
+                      ? game->cursor_x - vtx / 2 : 0;
+    game->scroll_y = (game->cursor_y > (unsigned)(vty / 2))
+                      ? game->cursor_y - vty / 2 : 0;
+    if (game->scroll_x + vtx > MAP_WIDTH)
+        game->scroll_x = MAP_WIDTH - vtx;
+    if (game->scroll_y + vty > MAP_HEIGHT)
+        game->scroll_y = MAP_HEIGHT - vty;
+}
+
 void handle_input(GameState* game) {
     int key;
-    
+    int tile_px, vtx, vty;
+
     if (!kbhit())
         return;
-    
+
+    /* Compute zoom-dependent viewport size */
+    tile_px = 16 >> game->zoom_level;
+    vtx = 640 / tile_px;
+    vty = 320 / tile_px;
+    if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
+    if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
+
     key = getch();
-    
+
     if (key == 0 || key == 0xE0) {
         /* Extended key */
         key = getch();
-        
+
         switch (key) {
             case 72: /* Up arrow */
                 if (game->cursor_y > 0) {
@@ -385,8 +433,8 @@ void handle_input(GameState* game) {
             case 80: /* Down arrow */
                 if (game->cursor_y < MAP_HEIGHT - 1) {
                     game->cursor_y++;
-                    if (game->cursor_y >= game->scroll_y + VIEW_TILES_Y)
-                        game->scroll_y = game->cursor_y - VIEW_TILES_Y + 1;
+                    if (game->cursor_y >= game->scroll_y + vty)
+                        game->scroll_y = game->cursor_y - vty + 1;
                 }
                 break;
             case 75: /* Left arrow */
@@ -399,8 +447,8 @@ void handle_input(GameState* game) {
             case 77: /* Right arrow */
                 if (game->cursor_x < MAP_WIDTH - 1) {
                     game->cursor_x++;
-                    if (game->cursor_x >= game->scroll_x + VIEW_TILES_X)
-                        game->scroll_x = game->cursor_x - VIEW_TILES_X + 1;
+                    if (game->cursor_x >= game->scroll_x + vtx)
+                        game->scroll_x = game->cursor_x - vtx + 1;
                 }
                 break;
             case 59: /* F1 - Help */
@@ -411,7 +459,7 @@ void handle_input(GameState* game) {
         /* Regular key */
         switch (key) {
             case ' ': /* Space - place tile */
-                if (game->game_state == STATE_CITY_VIEW) {
+                if (game->game_state == STATE_CITY_VIEW && game->zoom_level == 0) {
                     place_tile(game, game->cursor_x, game->cursor_y, game->current_tool);
                 }
                 break;
@@ -466,6 +514,19 @@ void handle_input(GameState* game) {
                 } else if (game->num_humans > 0) {
                     game->selected_human = rand_range(0, game->num_humans - 1);
                     game->game_state = STATE_HUMAN_VIEW;
+                }
+                break;
+            case '-': /* Zoom out */
+                if (game->zoom_level < 4) {
+                    game->zoom_level++;
+                    recentre_scroll(game);
+                }
+                break;
+            case '+': /* Zoom in */
+            case '=':
+                if (game->zoom_level > 0) {
+                    game->zoom_level--;
+                    recentre_scroll(game);
                 }
                 break;
             case 27: /* ESC */

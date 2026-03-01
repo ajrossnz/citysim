@@ -18,7 +18,7 @@ static TileArt tile_art_map[NUM_TILE_TYPES] = {
     NULL,           /*  1: TILE_RESIDENTIAL  */
     NULL,           /*  2: TILE_COMMERCIAL   */
     NULL,           /*  3: TILE_INDUSTRIAL   */
-    tile_road1,     /*  4: TILE_ROAD         */
+    NULL,           /*  4: TILE_ROAD (context-aware) */
     NULL,           /*  5: TILE_POWER_LINE   */
     NULL,           /*  6: TILE_WATER        */
     tile_park1,     /*  7: TILE_PARK         */
@@ -394,10 +394,199 @@ static void draw_tile_pixels(int sx, int sy, TileArt pixels) {
     outp(0x3C5, 0x0F);
 }
 
+/*
+ * Rotate a 16x16 tile: rotation 0=0deg, 1=90CW, 2=180, 3=270CW.
+ * 90CW: dst[y][x] = src[15-x][y]
+ */
+static void rotate_tile(const unsigned char src[16][16],
+                        unsigned char dst[16][16], int rotation) {
+    int x, y;
+    if (rotation == 0) {
+        memcpy(dst, src, 256);
+    } else if (rotation == 1) {
+        for (y = 0; y < 16; y++)
+            for (x = 0; x < 16; x++)
+                dst[y][x] = src[15 - x][y];
+    } else if (rotation == 2) {
+        for (y = 0; y < 16; y++)
+            for (x = 0; x < 16; x++)
+                dst[y][x] = src[15 - y][15 - x];
+    } else {
+        for (y = 0; y < 16; y++)
+            for (x = 0; x < 16; x++)
+                dst[y][x] = src[x][15 - y];
+    }
+}
+
+/*
+ * Compute a 4-bit neighbor bitmask for same-type tiles.
+ * N=1, S=2, E=4, W=8
+ */
+static unsigned char neighbor_mask(GameState *game,
+                                   unsigned short mx, unsigned short my,
+                                   unsigned char tile_type) {
+    unsigned char mask = 0;
+    if (my > 0 && game->map[my - 1][mx].type == tile_type)
+        mask |= 1;  /* N */
+    if (my + 1 < MAP_HEIGHT && game->map[my + 1][mx].type == tile_type)
+        mask |= 2;  /* S */
+    if (mx + 1 < MAP_WIDTH && game->map[my][mx + 1].type == tile_type)
+        mask |= 4;  /* E */
+    if (mx > 0 && game->map[my][mx - 1].type == tile_type)
+        mask |= 8;  /* W */
+    return mask;
+}
+
+/*
+ * Road tile selection table, indexed by neighbor bitmask.
+ * art: 0=horiz, 1=vert, 2=turn.  rot: rotation (0-3).
+ */
+static const struct { unsigned char art; unsigned char rot; } road_table[16] = {
+    {0, 0}, /* 0:  isolated  -> horiz */
+    {1, 0}, /* 1:  N         -> vert */
+    {1, 0}, /* 2:  S         -> vert */
+    {1, 0}, /* 3:  N+S       -> vert */
+    {0, 0}, /* 4:  E         -> horiz */
+    {2, 1}, /* 5:  N+E       -> turn 90CW */
+    {2, 2}, /* 6:  S+E       -> turn 180 */
+    {1, 0}, /* 7:  N+S+E     -> vert (no T) */
+    {0, 0}, /* 8:  W         -> horiz */
+    {2, 0}, /* 9:  N+W       -> turn 0 */
+    {2, 3}, /* 10: S+W       -> turn 270CW */
+    {1, 0}, /* 11: N+S+W     -> vert (no T) */
+    {0, 0}, /* 12: E+W       -> horiz */
+    {0, 0}, /* 13: N+E+W     -> horiz (no T) */
+    {0, 0}, /* 14: S+E+W     -> horiz (no T) */
+    {0, 0}, /* 15: all       -> horiz (no cross) */
+};
+
+/*
+ * Extract a 16x16 sub-tile from a larger tile art array and draw it.
+ * sub_row/sub_col select which 16x16 cell within the multi-tile art.
+ * art_width is the pixel width of the full art (e.g. 48 for 3x3).
+ */
+static void draw_multitile_sub(int sx, int sy,
+                               const unsigned char *art,
+                               int art_width,
+                               int sub_row, int sub_col) {
+    unsigned char subtile[16][16];
+    int y, x;
+    int base_y = sub_row * 16;
+    int base_x = sub_col * 16;
+
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < 16; x++)
+            subtile[y][x] = art[(base_y + y) * art_width + (base_x + x)];
+
+    draw_tile_pixels(sx, sy, (const unsigned char (*)[16])subtile);
+}
+
+/*
+ * Draw a tile using context-aware art selection for roads, rail, and
+ * multi-tile zones. For other tile types, falls back to draw_tile().
+ */
+void draw_tile_in_context(int screen_x, int screen_y,
+                          GameState *game,
+                          unsigned short map_x, unsigned short map_y) {
+#if defined(TILE_COUNT) && TILE_COUNT > 0
+    unsigned char tile_type = game->map[map_y][map_x].type;
+    unsigned char mask;
+
+    /* 3x3 residential zone: select art based on population state */
+    if (tile_type == TILE_RESIDENTIAL) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        int sub_row = subpos / 3;
+        int sub_col = subpos % 3;
+
+        if (game->map[map_y][map_x].population == 0) {
+            /* Unpopulated: draw from resunpop 48x48 art */
+            draw_multitile_sub(screen_x, screen_y,
+                               &tile_resunpop[0][0], 48,
+                               sub_row, sub_col);
+        } else {
+            /* Populated: solid colour fallback until populated art exists */
+            draw_filled_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE,
+                             COLOR_YELLOW);
+        }
+        return;
+    }
+
+    if (tile_type == TILE_ROAD) {
+        TileArt art;
+        unsigned char rot;
+        unsigned char entry_art;
+
+        mask = neighbor_mask(game, map_x, map_y, TILE_ROAD);
+        entry_art = road_table[mask].art;
+        rot = road_table[mask].rot;
+
+        if (entry_art == 0) art = tile_roadhoriz;
+        else if (entry_art == 1) art = tile_roadvert;
+        else art = tile_roadturn;
+
+        if (rot == 0) {
+            draw_tile_pixels(screen_x, screen_y, art);
+        } else {
+            unsigned char buf[16][16];
+            rotate_tile((const unsigned char (*)[16])art, buf, rot);
+            draw_tile_pixels(screen_x, screen_y,
+                             (const unsigned char (*)[16])buf);
+        }
+        return;
+    }
+
+    if (tile_type == TILE_RAIL) {
+        mask = neighbor_mask(game, map_x, map_y, TILE_RAIL);
+        /* Has N or S neighbor (and no E/W only) -> vertical (base tile) */
+        /* Has E or W neighbor (and no N/S only) -> horizontal (rotate 90) */
+        /* Both axes or turns -> fallback to solid colour */
+        if ((mask & 3) && !(mask & 12)) {
+            /* vertical */
+            draw_tile_pixels(screen_x, screen_y, tile_rail1);
+        } else if ((mask & 12) && !(mask & 3)) {
+            /* horizontal: rotate rail1 90CW */
+            unsigned char buf[16][16];
+            rotate_tile(tile_rail1, buf, 1);
+            draw_tile_pixels(screen_x, screen_y,
+                             (const unsigned char (*)[16])buf);
+        } else if (mask == 0) {
+            /* isolated rail: show vertical */
+            draw_tile_pixels(screen_x, screen_y, tile_rail1);
+        } else {
+            /* T/cross: solid colour fallback */
+            draw_filled_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE,
+                             get_tile_color(TILE_RAIL));
+        }
+        return;
+    }
+#endif
+
+    draw_tile(screen_x, screen_y, game->map[map_y][map_x].type);
+}
+
+unsigned char get_tile_color(unsigned char tile_type) {
+    switch (tile_type) {
+        case TILE_GRASS:        return COLOR_GREEN;
+        case TILE_RESIDENTIAL:  return COLOR_YELLOW;
+        case TILE_COMMERCIAL:   return COLOR_LIGHT_BLUE;
+        case TILE_INDUSTRIAL:   return COLOR_BROWN;
+        case TILE_ROAD:         return COLOR_DARK_GRAY;
+        case TILE_POWER_LINE:   return COLOR_LIGHT_GRAY;
+        case TILE_WATER:        return COLOR_BLUE;
+        case TILE_PARK:         return COLOR_LIGHT_GREEN;
+        case TILE_POLICE:       return COLOR_CYAN;
+        case TILE_FIRE:         return COLOR_RED;
+        case TILE_HOSPITAL:     return COLOR_WHITE;
+        case TILE_SCHOOL:       return COLOR_MAGENTA;
+        case TILE_POWER_PLANT:  return COLOR_LIGHT_RED;
+        case TILE_WATER_PUMP:   return COLOR_LIGHT_CYAN;
+        case TILE_RAIL:         return COLOR_BROWN;
+        default:                return COLOR_BLACK;
+    }
+}
+
 /* Draw a tile based on its type */
 void draw_tile(int screen_x, int screen_y, unsigned char tile_type) {
-    unsigned char color;
-
     /* Use pixel art if available for this tile type */
 #if defined(TILE_COUNT) && TILE_COUNT > 0
     if (tile_type < NUM_TILE_TYPES && tile_art_map[tile_type] != NULL) {
@@ -407,57 +596,8 @@ void draw_tile(int screen_x, int screen_y, unsigned char tile_type) {
 #endif
 
     /* Fallback: solid colour fill */
-    switch (tile_type) {
-        case TILE_GRASS:
-            color = COLOR_GREEN;
-            break;
-        case TILE_RESIDENTIAL:
-            color = COLOR_YELLOW;
-            break;
-        case TILE_COMMERCIAL:
-            color = COLOR_LIGHT_BLUE;
-            break;
-        case TILE_INDUSTRIAL:
-            color = COLOR_BROWN;
-            break;
-        case TILE_ROAD:
-            color = COLOR_DARK_GRAY;
-            break;
-        case TILE_POWER_LINE:
-            color = COLOR_LIGHT_GRAY;
-            break;
-        case TILE_WATER:
-            color = COLOR_BLUE;
-            break;
-        case TILE_PARK:
-            color = COLOR_LIGHT_GREEN;
-            break;
-        case TILE_POLICE:
-            color = COLOR_CYAN;
-            break;
-        case TILE_FIRE:
-            color = COLOR_RED;
-            break;
-        case TILE_HOSPITAL:
-            color = COLOR_WHITE;
-            break;
-        case TILE_SCHOOL:
-            color = COLOR_MAGENTA;
-            break;
-        case TILE_POWER_PLANT:
-            color = COLOR_LIGHT_RED;
-            break;
-        case TILE_WATER_PUMP:
-            color = COLOR_LIGHT_CYAN;
-            break;
-        case TILE_RAIL:
-            color = COLOR_BROWN;
-            break;
-        default:
-            color = COLOR_BLACK;
-    }
-    
-    draw_filled_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE, color);
+    draw_filled_rect(screen_x, screen_y, TILE_SIZE, TILE_SIZE,
+                     get_tile_color(tile_type));
 }
 
 void draw_map(GameState* game) {
@@ -472,39 +612,108 @@ void draw_map(GameState* game) {
             screen_x = tile_x * TILE_SIZE;
             screen_y = tile_y * TILE_SIZE;
 
-            draw_tile(screen_x, screen_y, game->map[map_y][map_x].type);
+            draw_tile_in_context(screen_x, screen_y, game, map_x, map_y);
+        }
+    }
+}
+
+void draw_map_zoomed(GameState* game) {
+    int tile_px, vtx, vty;
+    int tile_x, tile_y, map_x, map_y;
+    int screen_x, screen_y;
+    unsigned char color;
+
+    tile_px = 16 >> game->zoom_level;
+    vtx = 640 / tile_px;
+    vty = 320 / tile_px;
+    if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
+    if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
+
+    /* Clear map area — zoomed view may not fill the screen */
+    draw_filled_rect(0, 0, 640, 320, COLOR_BLACK);
+
+    for (tile_y = 0; tile_y < vty && tile_y + game->scroll_y < MAP_HEIGHT; tile_y++) {
+        for (tile_x = 0; tile_x < vtx && tile_x + game->scroll_x < MAP_WIDTH; tile_x++) {
+            map_x = tile_x + game->scroll_x;
+            map_y = tile_y + game->scroll_y;
+            screen_x = tile_x * tile_px;
+            screen_y = tile_y * tile_px;
+            color = get_tile_color(game->map[map_y][map_x].type);
+
+            if (tile_px == 1) {
+                set_pixel(screen_x, screen_y, color);
+            } else {
+                draw_filled_rect(screen_x, screen_y, tile_px, tile_px, color);
+            }
         }
     }
 }
 
 void draw_single_tile(GameState* game, unsigned short map_x, unsigned short map_y) {
     int screen_x, screen_y;
+    int tile_px, vtx, vty;
+
+    tile_px = 16 >> game->zoom_level;
+    vtx = 640 / tile_px;
+    vty = 320 / tile_px;
+    if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
+    if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
 
     /* Only draw if visible in viewport */
-    if (map_x < game->scroll_x || map_x >= game->scroll_x + VIEW_TILES_X ||
-        map_y < game->scroll_y || map_y >= game->scroll_y + VIEW_TILES_Y)
+    if (map_x < game->scroll_x || map_x >= game->scroll_x + vtx ||
+        map_y < game->scroll_y || map_y >= game->scroll_y + vty)
         return;
 
-    screen_x = (map_x - game->scroll_x) * TILE_SIZE;
-    screen_y = (map_y - game->scroll_y) * TILE_SIZE;
-    draw_tile(screen_x, screen_y, game->map[map_y][map_x].type);
+    screen_x = (map_x - game->scroll_x) * tile_px;
+    screen_y = (map_y - game->scroll_y) * tile_px;
+
+    if (game->zoom_level == 0) {
+        draw_tile_in_context(screen_x, screen_y, game, map_x, map_y);
+    } else {
+        unsigned char color = get_tile_color(game->map[map_y][map_x].type);
+        if (tile_px == 1) {
+            set_pixel(screen_x, screen_y, color);
+        } else {
+            draw_filled_rect(screen_x, screen_y, tile_px, tile_px, color);
+        }
+    }
 }
 
 void draw_cursor(GameState* game) {
     int screen_x, screen_y;
+    int tile_px, vtx, vty, corner;
 
-    if (game->cursor_x < game->scroll_x || game->cursor_x >= game->scroll_x + VIEW_TILES_X ||
-        game->cursor_y < game->scroll_y || game->cursor_y >= game->scroll_y + VIEW_TILES_Y)
+    tile_px = 16 >> game->zoom_level;
+    vtx = 640 / tile_px;
+    vty = 320 / tile_px;
+    if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
+    if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
+
+    if (game->cursor_x < game->scroll_x || game->cursor_x >= game->scroll_x + vtx ||
+        game->cursor_y < game->scroll_y || game->cursor_y >= game->scroll_y + vty)
         return;
 
-    screen_x = (game->cursor_x - game->scroll_x) * TILE_SIZE;
-    screen_y = (game->cursor_y - game->scroll_y) * TILE_SIZE;
+    screen_x = (game->cursor_x - game->scroll_x) * tile_px;
+    screen_y = (game->cursor_y - game->scroll_y) * tile_px;
 
-    /* Draw white corners */
-    draw_filled_rect(screen_x, screen_y, 4, 4, COLOR_WHITE);
-    draw_filled_rect(screen_x + TILE_SIZE - 4, screen_y, 4, 4, COLOR_WHITE);
-    draw_filled_rect(screen_x, screen_y + TILE_SIZE - 4, 4, 4, COLOR_WHITE);
-    draw_filled_rect(screen_x + TILE_SIZE - 4, screen_y + TILE_SIZE - 4, 4, 4, COLOR_WHITE);
+    if (game->zoom_level == 0) {
+        /* Original 16px cursor: 4px white corners */
+        draw_filled_rect(screen_x, screen_y, 4, 4, COLOR_WHITE);
+        draw_filled_rect(screen_x + 12, screen_y, 4, 4, COLOR_WHITE);
+        draw_filled_rect(screen_x, screen_y + 12, 4, 4, COLOR_WHITE);
+        draw_filled_rect(screen_x + 12, screen_y + 12, 4, 4, COLOR_WHITE);
+    } else if (tile_px >= 4) {
+        /* 8px or 4px tiles: scaled corners */
+        corner = tile_px / 4;
+        if (corner < 1) corner = 1;
+        draw_filled_rect(screen_x, screen_y, corner, corner, COLOR_WHITE);
+        draw_filled_rect(screen_x + tile_px - corner, screen_y, corner, corner, COLOR_WHITE);
+        draw_filled_rect(screen_x, screen_y + tile_px - corner, corner, corner, COLOR_WHITE);
+        draw_filled_rect(screen_x + tile_px - corner, screen_y + tile_px - corner, corner, corner, COLOR_WHITE);
+    } else {
+        /* 2px or 1px tiles: solid white block */
+        draw_filled_rect(screen_x, screen_y, tile_px, tile_px, COLOR_WHITE);
+    }
 }
 
 void draw_help_screen(void) {
@@ -618,8 +827,14 @@ void draw_ui(GameState* game) {
         draw_text(340, bar_y, time_buf, COLOR_LIGHT_CYAN);
     }
 
-    /* Current tool name */
-    draw_text(420, bar_y, get_tile_name(game->current_tool), COLOR_LIGHT_GREEN);
+    /* Current tool name or zoom indicator */
+    if (game->zoom_level > 0) {
+        char zoom_buf[10];
+        sprintf(zoom_buf, "ZOOM %dx", 1 << game->zoom_level);
+        draw_text(420, bar_y, zoom_buf, COLOR_LIGHT_MAGENTA);
+    } else {
+        draw_text(420, bar_y, get_tile_name(game->current_tool), COLOR_LIGHT_GREEN);
+    }
 
     /* Coordinates */
     {
