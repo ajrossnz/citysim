@@ -1,5 +1,37 @@
 #include "citysim.h"
 
+#define IS_ZONE(t) ((t) == TILE_RESIDENTIAL || (t) == TILE_COMMERCIAL || (t) == TILE_INDUSTRIAL)
+
+/* ---- Mouse driver (INT 33h) ---- */
+
+int mouse_init(void) {
+    union REGS regs;
+    regs.x.eax = 0x0000;  /* Function 0: init/reset */
+    int386(0x33, &regs, &regs);
+    return (regs.x.eax == 0xFFFF) ? 1 : 0;
+}
+
+void mouse_read(MouseState* ms) {
+    union REGS regs;
+    regs.x.eax = 0x0003;  /* Function 3: get position and buttons */
+    int386(0x33, &regs, &regs);
+    ms->buttons = (unsigned char)(regs.x.ebx & 0x07);
+    ms->pixel_x = (unsigned short)(regs.x.ecx);
+    ms->pixel_y = (unsigned short)(regs.x.edx);
+}
+
+void mouse_show(void) {
+    union REGS regs;
+    regs.x.eax = 0x0001;
+    int386(0x33, &regs, &regs);
+}
+
+void mouse_hide(void) {
+    union REGS regs;
+    regs.x.eax = 0x0002;
+    int386(0x33, &regs, &regs);
+}
+
 static unsigned int seed = 12345;
 
 unsigned int rand_range(unsigned int min, unsigned int max) {
@@ -52,6 +84,7 @@ const char* get_tile_name(unsigned char type) {
         case TILE_POWER_PLANT: return "Power Plant";
         case TILE_WATER_PUMP: return "Water Pump";
         case TILE_RAIL: return "Rail";
+        case TILE_BULLDOZER: return "Bulldozer";
         default: return "Unknown";
     }
 }
@@ -59,6 +92,7 @@ const char* get_tile_name(unsigned char type) {
 int get_tile_cost(unsigned char type) {
     switch (type) {
         case TILE_GRASS: return 0;
+        case TILE_BULLDOZER: return 1;
         case TILE_RESIDENTIAL: return 100;
         case TILE_COMMERCIAL: return 150;
         case TILE_INDUSTRIAL: return 200;
@@ -129,7 +163,6 @@ void spawn_human(GameState* game, unsigned short x, unsigned short y) {
     human->education = rand_range(40, 80);
     
     game->num_humans++;
-    game->population++;
 }
 
 void calculate_human_activity(GameState* game, Human* human) {
@@ -259,19 +292,32 @@ void update_tile_services(GameState* game) {
                             game->map[y + r][x + c].power = 1;
                     }
                 }
-                /* Enqueue adjacent power lines on the perimeter */
+                /* Energise adjacent tiles on the perimeter */
                 for (r = -1; r <= 3; r++) {
                     for (c = -1; c <= 3; c++) {
                         if (r >= 0 && r <= 2 && c >= 0 && c <= 2)
                             continue;  /* skip interior */
                         ny = y + r;
                         nx = x + c;
-                        if (ny < MAP_HEIGHT && nx < MAP_WIDTH &&
-                            game->map[ny][nx].type == TILE_POWER_LINE &&
-                            !game->map[ny][nx].power &&
+                        if (ny >= MAP_HEIGHT || nx >= MAP_WIDTH)
+                            continue;
+                        t = game->map[ny][nx].type;
+                        if (t == TILE_POWER_LINE && !game->map[ny][nx].power &&
                             tail < 4096) {
                             game->map[ny][nx].power = 1;
                             queue[tail++] = (unsigned int)ny * MAP_WIDTH + nx;
+                        } else if (IS_ZONE(t) && !game->map[ny][nx].power) {
+                            if (find_zone_anchor(game, nx, ny, &ax, &ay)) {
+                                int zr, zc;
+                                for (zr = 0; zr < 3; zr++)
+                                    for (zc = 0; zc < 3; zc++)
+                                        if (ay + zr < MAP_HEIGHT && ax + zc < MAP_WIDTH)
+                                            game->map[ay + zr][ax + zc].power = 1;
+                            }
+                        } else if (t != TILE_POWER_PLANT && t != TILE_GRASS &&
+                                   t != TILE_ROAD && t != TILE_RAIL &&
+                                   t != TILE_WATER && !game->map[ny][nx].power) {
+                            game->map[ny][nx].power = 1;
                         }
                     }
                 }
@@ -339,6 +385,101 @@ void update_tile_services(GameState* game) {
         }
     }
 
+    /* --- Phase 4: Zone-to-zone power transfer BFS --- */
+    {
+        static unsigned int zqueue[4096];
+        int zhead = 0, ztail = 0;
+        int pr, pc;
+
+        /* Seed: enqueue every powered zone anchor */
+        for (y = 0; y < MAP_HEIGHT; y++) {
+            for (x = 0; x < MAP_WIDTH; x++) {
+                if (IS_ZONE(game->map[y][x].type) &&
+                    game->map[y][x].development == 0 &&
+                    game->map[y][x].power &&
+                    ztail < 4096) {
+                    zqueue[ztail++] = (unsigned int)y * MAP_WIDTH + x;
+                }
+            }
+        }
+
+        /* BFS: for each anchor, probe 12 cardinal-adjacent perimeter cells */
+        while (zhead < ztail) {
+            unsigned short zy = (unsigned short)(zqueue[zhead] / MAP_WIDTH);
+            unsigned short zx = (unsigned short)(zqueue[zhead] % MAP_WIDTH);
+            zhead++;
+
+            /* North edge: row=-1, col=0..2 */
+            for (pc = 0; pc < 3; pc++) {
+                pr = -1;
+                nx = zx + pc; ny = zy + pr;
+                if (nx < MAP_WIDTH && ny < MAP_HEIGHT &&
+                    IS_ZONE(game->map[ny][nx].type) &&
+                    !game->map[ny][nx].power) {
+                    if (find_zone_anchor(game, nx, ny, &ax, &ay)) {
+                        for (r = 0; r < 3; r++)
+                            for (c = 0; c < 3; c++)
+                                if (ay + r < MAP_HEIGHT && ax + c < MAP_WIDTH)
+                                    game->map[ay + r][ax + c].power = 1;
+                        if (ztail < 4096)
+                            zqueue[ztail++] = (unsigned int)ay * MAP_WIDTH + ax;
+                    }
+                }
+            }
+            /* South edge: row=3, col=0..2 */
+            for (pc = 0; pc < 3; pc++) {
+                pr = 3;
+                nx = zx + pc; ny = zy + pr;
+                if (nx < MAP_WIDTH && ny < MAP_HEIGHT &&
+                    IS_ZONE(game->map[ny][nx].type) &&
+                    !game->map[ny][nx].power) {
+                    if (find_zone_anchor(game, nx, ny, &ax, &ay)) {
+                        for (r = 0; r < 3; r++)
+                            for (c = 0; c < 3; c++)
+                                if (ay + r < MAP_HEIGHT && ax + c < MAP_WIDTH)
+                                    game->map[ay + r][ax + c].power = 1;
+                        if (ztail < 4096)
+                            zqueue[ztail++] = (unsigned int)ay * MAP_WIDTH + ax;
+                    }
+                }
+            }
+            /* West edge: col=-1, row=0..2 */
+            for (pr = 0; pr < 3; pr++) {
+                pc = -1;
+                nx = zx + pc; ny = zy + pr;
+                if (nx < MAP_WIDTH && ny < MAP_HEIGHT &&
+                    IS_ZONE(game->map[ny][nx].type) &&
+                    !game->map[ny][nx].power) {
+                    if (find_zone_anchor(game, nx, ny, &ax, &ay)) {
+                        for (r = 0; r < 3; r++)
+                            for (c = 0; c < 3; c++)
+                                if (ay + r < MAP_HEIGHT && ax + c < MAP_WIDTH)
+                                    game->map[ay + r][ax + c].power = 1;
+                        if (ztail < 4096)
+                            zqueue[ztail++] = (unsigned int)ay * MAP_WIDTH + ax;
+                    }
+                }
+            }
+            /* East edge: col=3, row=0..2 */
+            for (pr = 0; pr < 3; pr++) {
+                pc = 3;
+                nx = zx + pc; ny = zy + pr;
+                if (nx < MAP_WIDTH && ny < MAP_HEIGHT &&
+                    IS_ZONE(game->map[ny][nx].type) &&
+                    !game->map[ny][nx].power) {
+                    if (find_zone_anchor(game, nx, ny, &ax, &ay)) {
+                        for (r = 0; r < 3; r++)
+                            for (c = 0; c < 3; c++)
+                                if (ay + r < MAP_HEIGHT && ax + c < MAP_WIDTH)
+                                    game->map[ay + r][ax + c].power = 1;
+                        if (ztail < 4096)
+                            zqueue[ztail++] = (unsigned int)ay * MAP_WIDTH + ax;
+                    }
+                }
+            }
+        }
+    }
+
     /* --- Water: radius-based from water pumps --- */
     for (y = 0; y < MAP_HEIGHT; y++) {
         for (x = 0; x < MAP_WIDTH; x++) {
@@ -354,26 +495,215 @@ void update_tile_services(GameState* game) {
             }
         }
     }
+
+    /* --- Pollution: reset and accumulate from sources --- */
+    for (y = 0; y < MAP_HEIGHT; y++)
+        for (x = 0; x < MAP_WIDTH; x++)
+            game->map[y][x].pollution = 0;
+
+    for (y = 0; y < MAP_HEIGHT; y++) {
+        for (x = 0; x < MAP_WIDTH; x++) {
+            int base = 0, radius = 0;
+            t = game->map[y][x].type;
+
+            if (t == TILE_INDUSTRIAL && game->map[y][x].development == 0) {
+                base = 80; radius = 8;
+            } else if (t == TILE_POWER_PLANT && game->map[y][x].development == 0) {
+                base = 60; radius = 10;
+            } else if (t == TILE_ROAD) {
+                base = 10; radius = 2;
+            } else if ((t == TILE_RESIDENTIAL || t == TILE_COMMERCIAL) &&
+                       game->map[y][x].development == 0 &&
+                       game->map[y][x].population > 0) {
+                base = 3; radius = 1;
+            }
+
+            if (base > 0) {
+                for (dy = -radius; dy <= radius; dy++) {
+                    for (dx = -radius; dx <= radius; dx++) {
+                        int ny = y + dy, nx = x + dx;
+                        int dist, contrib;
+                        unsigned int val;
+                        if (ny < 0 || ny >= MAP_HEIGHT || nx < 0 || nx >= MAP_WIDTH)
+                            continue;
+                        dist = abs(dx) + abs(dy);
+                        if (dist > radius) continue;
+                        contrib = base - (base * dist / radius);
+                        val = (unsigned int)game->map[ny][nx].pollution + contrib;
+                        game->map[ny][nx].pollution = (val > 255) ? 255 : (unsigned char)val;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Parks reduce pollution */
+    for (y = 0; y < MAP_HEIGHT; y++) {
+        for (x = 0; x < MAP_WIDTH; x++) {
+            if (game->map[y][x].type == TILE_PARK) {
+                for (dy = -4; dy <= 4; dy++) {
+                    for (dx = -4; dx <= 4; dx++) {
+                        int ny = y + dy, nx = x + dx;
+                        int dist, reduction;
+                        if (ny < 0 || ny >= MAP_HEIGHT || nx < 0 || nx >= MAP_WIDTH)
+                            continue;
+                        dist = abs(dx) + abs(dy);
+                        if (dist > 4) continue;
+                        reduction = 20 - (20 * dist / 4);
+                        if (game->map[ny][nx].pollution > reduction)
+                            game->map[ny][nx].pollution -= (unsigned char)reduction;
+                        else
+                            game->map[ny][nx].pollution = 0;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void update_buildings(GameState* game) {
     int x, y;
 
-    /* Update residential zones - only check top-left tile of each 3x3 block */
+    /* --- RCI demand computation --- */
+    game->r_pop = 0;
+    game->c_pop = 0;
+    game->i_pop = 0;
+
     for (y = 0; y < MAP_HEIGHT; y++) {
         for (x = 0; x < MAP_WIDTH; x++) {
+            if (game->map[y][x].development == 0 &&
+                game->map[y][x].population > 0) {
+                int r, c;
+                unsigned int cnt = 0;
+                if (y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
+                    for (r = 0; r < 3; r++)
+                        for (c = 0; c < 3; c++)
+                            if (game->map[y+r][x+c].population)
+                                cnt++;
+                }
+                if (game->map[y][x].type == TILE_RESIDENTIAL)
+                    game->r_pop += cnt;
+                else if (game->map[y][x].type == TILE_COMMERCIAL)
+                    game->c_pop += cnt;
+                else if (game->map[y][x].type == TILE_INDUSTRIAL)
+                    game->i_pop += cnt;
+            }
+        }
+    }
+
+    /* R demand: bootstrap floor of 10 when no industry/commerce */
+    if (game->i_pop == 0 && game->c_pop == 0)
+        game->rci_demand[0] = 10;
+    else
+        game->rci_demand[0] = (int)(game->i_pop + game->c_pop) * 3 / 2 - (int)game->r_pop;
+    game->rci_demand[1] = (int)game->r_pop / 2 - (int)game->c_pop;
+    game->rci_demand[2] = (int)game->r_pop * 3 / 10 - (int)game->i_pop;
+
+    /* Update zones - only check top-left tile of each 3x3 block */
+    for (y = 0; y < MAP_HEIGHT; y++) {
+        for (x = 0; x < MAP_WIDTH; x++) {
+            /* --- Residential growth (gated on R demand) --- */
             if (game->map[y][x].type == TILE_RESIDENTIAL &&
                 game->map[y][x].development == 0) {
-                /* Spawn humans in residential zones with power and water */
-                if (game->map[y][x].power && game->map[y][x].water) {
-                    if (rand_range(0, 1000) < 2 && game->num_humans < MAX_HUMANS) {
-                        spawn_human(game, x + 1, y + 1);
-                        /* Mark all 9 tiles as populated */
-                        if (y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
-                            int r, c;
-                            for (r = 0; r < 3; r++)
-                                for (c = 0; c < 3; c++)
-                                    game->map[y+r][x+c].population = 1;
+                if (game->map[y][x].power && game->rci_demand[0] > 0 &&
+                    y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
+                    int r, c, pop_count = 0;
+                    for (r = 0; r < 3; r++)
+                        for (c = 0; c < 3; c++)
+                            if (game->map[y+r][x+c].population)
+                                pop_count++;
+
+                    {
+                        int growth_chance = 10;
+                        unsigned char poll = game->map[y][x].pollution;
+                        unsigned char dens = game->map[y][x].density;
+
+                        if (dens == 2 && poll > 60)
+                            growth_chance -= 3;
+                        else if (dens == 1 && poll > 40)
+                            growth_chance -= 4;
+                        else if (dens == 0 && poll > 30)
+                            growth_chance -= 5;
+                        if (growth_chance < 1) growth_chance = 1;
+
+                        if (pop_count < 9 && rand_range(0, 100) < (unsigned)growth_chance) {
+                            int target = (int)rand_range(0, 8 - pop_count);
+                            int found = 0;
+                            for (r = 0; r < 3 && !found; r++) {
+                                for (c = 0; c < 3 && !found; c++) {
+                                    if (!game->map[y+r][x+c].population) {
+                                        if (target == 0) {
+                                            game->map[y+r][x+c].population = 1;
+                                            game->population += (pop_count == 8) ? 112 : 111;
+                                            found = 1;
+                                        } else {
+                                            target--;
+                                        }
+                                    }
+                                }
+                            }
+                            if (pop_count == 0 && game->num_humans < MAX_HUMANS)
+                                spawn_human(game, x + 1, y + 1);
+                        }
+                    }
+                }
+            }
+
+            /* --- Commercial growth (gated on C demand) --- */
+            if (game->map[y][x].type == TILE_COMMERCIAL &&
+                game->map[y][x].development == 0) {
+                if (game->map[y][x].power && game->rci_demand[1] > 0 &&
+                    y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
+                    int r, c, pop_count = 0;
+                    for (r = 0; r < 3; r++)
+                        for (c = 0; c < 3; c++)
+                            if (game->map[y+r][x+c].population)
+                                pop_count++;
+
+                    if (pop_count < 9 && rand_range(0, 100) < 10) {
+                        int target = (int)rand_range(0, 8 - pop_count);
+                        int found = 0;
+                        for (r = 0; r < 3 && !found; r++) {
+                            for (c = 0; c < 3 && !found; c++) {
+                                if (!game->map[y+r][x+c].population) {
+                                    if (target == 0) {
+                                        game->map[y+r][x+c].population = 1;
+                                        found = 1;
+                                    } else {
+                                        target--;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* --- Industrial growth (gated on I demand) --- */
+            if (game->map[y][x].type == TILE_INDUSTRIAL &&
+                game->map[y][x].development == 0) {
+                if (game->map[y][x].power && game->rci_demand[2] > 0 &&
+                    y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
+                    int r, c, pop_count = 0;
+                    for (r = 0; r < 3; r++)
+                        for (c = 0; c < 3; c++)
+                            if (game->map[y+r][x+c].population)
+                                pop_count++;
+
+                    if (pop_count < 9 && rand_range(0, 100) < 10) {
+                        int target = (int)rand_range(0, 8 - pop_count);
+                        int found = 0;
+                        for (r = 0; r < 3 && !found; r++) {
+                            for (c = 0; c < 3 && !found; c++) {
+                                if (!game->map[y+r][x+c].population) {
+                                    if (target == 0) {
+                                        game->map[y+r][x+c].population = 1;
+                                        found = 1;
+                                    } else {
+                                        target--;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -387,13 +717,29 @@ void update_buildings(GameState* game) {
                 game->map[y][x].population > 0 &&
                 !game->map[y][x].power) {
                 if (rand_range(0, 2880) == 0) {
-                    int r, c;
+                    int r, c, pop_count = 0;
                     unsigned int i;
+                    /* Count populated sub-tiles before clearing */
+                    if (y + 2 < MAP_HEIGHT && x + 2 < MAP_WIDTH) {
+                        for (r = 0; r < 3; r++)
+                            for (c = 0; c < 3; c++)
+                                if (game->map[y+r][x+c].population)
+                                    pop_count++;
+                    }
                     /* Clear population on all 9 tiles */
                     for (r = 0; r < 3; r++)
                         for (c = 0; c < 3; c++)
                             if (y + r < MAP_HEIGHT && x + c < MAP_WIDTH)
                                 game->map[y+r][x+c].population = 0;
+                    /* Subtract zone population based on how full it was */
+                    if (game->map[y][x].type == TILE_RESIDENTIAL) {
+                        unsigned int zone_pop = (unsigned int)pop_count * 111;
+                        if (pop_count == 9) zone_pop = 1000;
+                        if (game->population >= zone_pop)
+                            game->population -= zone_pop;
+                        else
+                            game->population = 0;
+                    }
                     /* Remove humans whose home is within this 3x3 block */
                     i = 0;
                     while (i < game->num_humans) {
@@ -403,7 +749,6 @@ void update_buildings(GameState* game) {
                             game->humans[i].home_y < y + 3) {
                             /* Swap-remove */
                             game->num_humans--;
-                            game->population--;
                             if (i < game->num_humans)
                                 game->humans[i] = game->humans[game->num_humans];
                         } else {
@@ -441,6 +786,67 @@ void update_game(GameState* game) {
             game->funds += game->population * 5;
         }
     }
+}
+
+static void clear_tile(GameState *game, unsigned short x, unsigned short y) {
+    game->map[y][x].type = TILE_GRASS;
+    game->map[y][x].population = 0;
+    game->map[y][x].power = 0;
+    game->map[y][x].water = 0;
+    game->map[y][x].development = 0;
+    game->map[y][x].pollution = 0;
+    game->map[y][x].density = 0;
+}
+
+void bulldoze_tile(GameState* game, unsigned short x, unsigned short y) {
+    unsigned char type;
+    int cost = 1;  /* base bulldoze cost per tile */
+
+    if (x >= MAP_WIDTH || y >= MAP_HEIGHT)
+        return;
+
+    type = game->map[y][x].type;
+    if (type == TILE_GRASS)
+        return;  /* nothing to bulldoze */
+
+    /* 3x3 zone or building: find anchor and clear all 9 tiles */
+    if (type == TILE_RESIDENTIAL || type == TILE_COMMERCIAL ||
+        type == TILE_INDUSTRIAL || type == TILE_POWER_PLANT) {
+        unsigned short ax, ay;
+        int r, c;
+        if (!find_zone_anchor(game, x, y, &ax, &ay))
+            return;
+        if (game->funds < cost)
+            return;
+        game->funds -= cost;
+        for (r = 0; r < 3; r++)
+            for (c = 0; c < 3; c++)
+                if (ay + r < MAP_HEIGHT && ax + c < MAP_WIDTH)
+                    clear_tile(game, ax + c, ay + r);
+        return;
+    }
+
+    /* Power line with road/rail underneath: restore the underlying tile */
+    if (type == TILE_POWER_LINE) {
+        unsigned char under = game->map[y][x].development;
+        if (game->funds < cost)
+            return;
+        game->funds -= cost;
+        if (under == TILE_ROAD || under == TILE_RAIL) {
+            game->map[y][x].type = under;
+            game->map[y][x].development = 0;
+            game->map[y][x].power = 0;
+        } else {
+            clear_tile(game, x, y);
+        }
+        return;
+    }
+
+    /* 1x1 tile (road, rail, park, etc.) */
+    if (game->funds < cost)
+        return;
+    game->funds -= cost;
+    clear_tile(game, x, y);
 }
 
 void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned char type) {
@@ -481,6 +887,7 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
                 bx = x - 1 + c;
                 game->map[by][bx].type = type;
                 game->map[by][bx].development = (unsigned char)(r * 3 + c);
+                game->map[by][bx].density = game->current_density;
             }
         }
         return;
@@ -504,6 +911,18 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
         game->funds -= cost;
         game->map[y][x].type = TILE_POWER_LINE;
         game->map[y][x].development = (existing == TILE_GRASS) ? 0 : existing;
+        return;
+    }
+
+    /* Road or rail on existing power line: composite (power line stays) */
+    if ((type == TILE_ROAD || type == TILE_RAIL) &&
+        game->map[y][x].type == TILE_POWER_LINE &&
+        game->map[y][x].development == 0) {
+        cost = get_tile_cost(type);
+        if (game->funds < cost)
+            return;
+        game->funds -= cost;
+        game->map[y][x].development = type;
         return;
     }
 
@@ -540,7 +959,7 @@ static void recentre_scroll(GameState* game) {
 
     tile_px = 16 >> game->zoom_level;
     vtx = 640 / tile_px;
-    vty = 320 / tile_px;
+    vty = (VIEW_TILES_Y * TILE_SIZE) / tile_px;
     if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
     if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
 
@@ -554,6 +973,77 @@ static void recentre_scroll(GameState* game) {
         game->scroll_y = MAP_HEIGHT - vty;
 }
 
+void handle_menu_input(GameState* game, int key, int extended) {
+    const MenuItem *items;
+
+    if (extended) {
+        switch (key) {
+            case 75: /* Left arrow */
+                if (game->menu_selected > 0)
+                    game->menu_selected--;
+                else
+                    game->menu_selected = NUM_MENUS - 1;
+                game->menu_drop_sel = menu_first_selectable(game->menu_selected);
+                break;
+            case 77: /* Right arrow */
+                if (game->menu_selected < NUM_MENUS - 1)
+                    game->menu_selected++;
+                else
+                    game->menu_selected = 0;
+                game->menu_drop_sel = menu_first_selectable(game->menu_selected);
+                break;
+            case 72: /* Up arrow */
+                game->menu_drop_sel = menu_next_selectable(
+                    game->menu_selected, game->menu_drop_sel, -1);
+                break;
+            case 80: /* Down arrow */
+                game->menu_drop_sel = menu_next_selectable(
+                    game->menu_selected, game->menu_drop_sel, 1);
+                break;
+        }
+        return;
+    }
+
+    /* Regular keys */
+    switch (key) {
+        case 27: /* ESC - close menu */
+            game->menu_active = 0;
+            break;
+        case 17: /* Ctrl+Q */
+            set_text_mode();
+            exit(0);
+            break;
+        case 13: /* Enter - execute selection */
+            if (game->menu_drop_sel >= 0 &&
+                game->menu_drop_sel < menu_counts[game->menu_selected]) {
+                items = menu_items[game->menu_selected];
+                if (items[game->menu_drop_sel].flags & (MF_HEADING | MF_DISABLED))
+                    break;
+                switch (items[game->menu_drop_sel].action) {
+                    case 0: /* Set tool */
+                        game->current_tool = items[game->menu_drop_sel].tile_type & 0x1F;
+                        game->current_density = items[game->menu_drop_sel].tile_type >> 5;
+                        game->menu_active = 0;
+                        break;
+                    case 1: /* Help */
+                        game->menu_active = 0;
+                        game->game_state = STATE_MENU;
+                        break;
+                    case 2: /* Quit */
+                        set_text_mode();
+                        exit(0);
+                        break;
+                    case 3: /* About - no-op for now */
+                        game->menu_active = 0;
+                        break;
+                    case 4: /* Noop / placeholder */
+                        break;
+                }
+            }
+            break;
+    }
+}
+
 void handle_input(GameState* game) {
     int key;
     int tile_px, vtx, vty;
@@ -564,11 +1054,22 @@ void handle_input(GameState* game) {
     /* Compute zoom-dependent viewport size */
     tile_px = 16 >> game->zoom_level;
     vtx = 640 / tile_px;
-    vty = 320 / tile_px;
+    vty = (VIEW_TILES_Y * TILE_SIZE) / tile_px;
     if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
     if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
 
     key = getch();
+
+    /* When menu is active, route all input to menu handler */
+    if (game->menu_active) {
+        if (key == 0 || key == 0xE0) {
+            key = getch();
+            handle_menu_input(game, key, 1);
+        } else {
+            handle_menu_input(game, key, 0);
+        }
+        return;
+    }
 
     if (key == 0 || key == 0xE0) {
         /* Extended key */
@@ -603,6 +1104,34 @@ void handle_input(GameState* game) {
                         game->scroll_x = game->cursor_x - vtx + 1;
                 }
                 break;
+            case 71: /* Home (numpad 7) - up-left diagonal */
+                if (game->cursor_y >= 10) game->cursor_y -= 10;
+                else game->cursor_y = 0;
+                if (game->cursor_x >= 10) game->cursor_x -= 10;
+                else game->cursor_x = 0;
+                recentre_scroll(game);
+                break;
+            case 73: /* PgUp (numpad 9) - up-right diagonal */
+                if (game->cursor_y >= 10) game->cursor_y -= 10;
+                else game->cursor_y = 0;
+                if (game->cursor_x + 10 < MAP_WIDTH) game->cursor_x += 10;
+                else game->cursor_x = MAP_WIDTH - 1;
+                recentre_scroll(game);
+                break;
+            case 79: /* End (numpad 1) - down-left diagonal */
+                if (game->cursor_y + 10 < MAP_HEIGHT) game->cursor_y += 10;
+                else game->cursor_y = MAP_HEIGHT - 1;
+                if (game->cursor_x >= 10) game->cursor_x -= 10;
+                else game->cursor_x = 0;
+                recentre_scroll(game);
+                break;
+            case 81: /* PgDn (numpad 3) - down-right diagonal */
+                if (game->cursor_y + 10 < MAP_HEIGHT) game->cursor_y += 10;
+                else game->cursor_y = MAP_HEIGHT - 1;
+                if (game->cursor_x + 10 < MAP_WIDTH) game->cursor_x += 10;
+                else game->cursor_x = MAP_WIDTH - 1;
+                recentre_scroll(game);
+                break;
             case 59: /* F1 - Help */
                 game->game_state = STATE_MENU;
                 break;
@@ -610,22 +1139,44 @@ void handle_input(GameState* game) {
     } else {
         /* Regular key */
         switch (key) {
-            case ' ': /* Space - place tile */
+            case ' ': /* Space - place tile or bulldoze */
                 if (game->game_state == STATE_CITY_VIEW && game->zoom_level == 0) {
-                    place_tile(game, game->cursor_x, game->cursor_y, game->current_tool);
+                    if (game->current_tool == TILE_BULLDOZER)
+                        bulldoze_tile(game, game->cursor_x, game->cursor_y);
+                    else
+                        place_tile(game, game->cursor_x, game->cursor_y, game->current_tool);
                 }
                 break;
             case 'r':
             case 'R':
-                game->current_tool = TILE_RESIDENTIAL;
+                if (game->current_tool == TILE_RESIDENTIAL)
+                    game->current_density = (game->current_density + 1) % 3;
+                else {
+                    game->current_tool = TILE_RESIDENTIAL;
+                    game->current_density = 0;
+                }
                 break;
             case 'c':
             case 'C':
-                game->current_tool = TILE_COMMERCIAL;
+                if (game->current_tool == TILE_COMMERCIAL)
+                    game->current_density = (game->current_density + 1) % 3;
+                else {
+                    game->current_tool = TILE_COMMERCIAL;
+                    game->current_density = 0;
+                }
                 break;
             case 'i':
             case 'I':
-                game->current_tool = TILE_INDUSTRIAL;
+                if (game->current_tool == TILE_INDUSTRIAL)
+                    game->current_density = (game->current_density + 1) % 3;
+                else {
+                    game->current_tool = TILE_INDUSTRIAL;
+                    game->current_density = 0;
+                }
+                break;
+            case 'b':
+            case 'B':
+                game->current_tool = TILE_BULLDOZER;
                 break;
             case 'd':
             case 'D':
@@ -689,14 +1240,46 @@ void handle_input(GameState* game) {
                     recentre_scroll(game);
                 }
                 break;
+            case '7': /* Numpad 7 (NumLock on) - up-left diagonal */
+                if (game->cursor_y >= 10) game->cursor_y -= 10;
+                else game->cursor_y = 0;
+                if (game->cursor_x >= 10) game->cursor_x -= 10;
+                else game->cursor_x = 0;
+                recentre_scroll(game);
+                break;
+            case '9': /* Numpad 9 (NumLock on) - up-right diagonal */
+                if (game->cursor_y >= 10) game->cursor_y -= 10;
+                else game->cursor_y = 0;
+                if (game->cursor_x + 10 < MAP_WIDTH) game->cursor_x += 10;
+                else game->cursor_x = MAP_WIDTH - 1;
+                recentre_scroll(game);
+                break;
+            case '1': /* Numpad 1 (NumLock on) - down-left diagonal */
+                if (game->cursor_y + 10 < MAP_HEIGHT) game->cursor_y += 10;
+                else game->cursor_y = MAP_HEIGHT - 1;
+                if (game->cursor_x >= 10) game->cursor_x -= 10;
+                else game->cursor_x = 0;
+                recentre_scroll(game);
+                break;
+            case '3': /* Numpad 3 (NumLock on) - down-right diagonal */
+                if (game->cursor_y + 10 < MAP_HEIGHT) game->cursor_y += 10;
+                else game->cursor_y = MAP_HEIGHT - 1;
+                if (game->cursor_x + 10 < MAP_WIDTH) game->cursor_x += 10;
+                else game->cursor_x = MAP_WIDTH - 1;
+                recentre_scroll(game);
+                break;
+            case 17: /* Ctrl+Q - Quit */
+                set_text_mode();
+                exit(0);
+                break;
             case 27: /* ESC */
                 if (game->game_state == STATE_HUMAN_VIEW || game->game_state == STATE_MENU) {
                     game->game_state = STATE_CITY_VIEW;
                 } else if (game->game_state == STATE_CITY_VIEW) {
-                    /* Quit the game - set a flag or exit */
-                    /* For now, just return to text mode and the main loop will end */
-                    set_text_mode();
-                    exit(0);
+                    /* Open menu */
+                    game->menu_active = 1;
+                    game->menu_selected = 0;
+                    game->menu_drop_sel = menu_first_selectable(0);
                 }
                 break;
         }

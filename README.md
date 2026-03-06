@@ -5,11 +5,11 @@ A SimCity-inspired city building game for 386 DOS machines with EGA graphics (16
 ## System Requirements
 
 - 386 processor or better
-- 4MB RAM
+- Ideally 4MB RAM (may work on less, haven't tested)
 - EGA graphics card (16 colours, 640x350)
 - DOS 5.0 or later (or DOSBox)
 
-## Building
+## Building from source
 
 ### Prerequisites
 
@@ -31,7 +31,7 @@ Or use the build script:
 ### Run in DOSBox
 
 ```bash
-dosbox citysim.exe
+dosbox dos4gw citysim.exe
 ```
 
 ## Controls
@@ -128,5 +128,7 @@ Citizens follow daily routines (sleeping, eating, commuting, working, leisure) a
 - Service buildings (police, fire, hospital, school) are placeable but have no gameplay mechanics yet
 
 ## Licence
+GNU GPL v2
 
-Educational / demonstration software.
+This is entirely a hobby for Educational / demonstration software purposes only.
+

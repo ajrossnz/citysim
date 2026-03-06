@@ -20,7 +20,9 @@
 #define MAP_HEIGHT 512
 #define TILE_SIZE 16        /* 16x16 pixels per tile in city view */
 #define VIEW_TILES_X 40     /* Number of tiles visible horizontally */
-#define VIEW_TILES_Y 20     /* Number of tiles visible vertically (320px, leaves 30px for status bar) */
+#define VIEW_TILES_Y 19     /* Number of tiles visible vertically (304px map + 16px menu bar) */
+#define MENU_BAR_HEIGHT 16  /* Top menu bar height in pixels */
+#define MAP_Y_OFFSET 16     /* Map starts below menu bar */
 
 /* Tile Types */
 #define TILE_GRASS 0
@@ -38,6 +40,7 @@
 #define TILE_POWER_PLANT 12
 #define TILE_WATER_PUMP 13
 #define TILE_RAIL 14
+#define TILE_BULLDOZER 15  /* pseudo-tool, never stored on map */
 
 /* Game States */
 #define STATE_CITY_VIEW 0
@@ -69,6 +72,7 @@
 #define COLOR_LIGHT_MAGENTA 13
 #define COLOR_YELLOW 14
 #define COLOR_WHITE 15
+#define COLOR_TRANSPARENT 255
 
 /* Maximum entities */
 #define MAX_HUMANS 256
@@ -87,6 +91,7 @@ typedef struct {
     unsigned char water;
     unsigned char development;
     unsigned char pollution;
+    unsigned char density;       /* 0=low, 1=med, 2=high (zones only) */
 } Tile;
 
 typedef struct {
@@ -131,9 +136,17 @@ typedef struct {
     unsigned short cursor_x;
     unsigned short cursor_y;
     unsigned char current_tool;
+    unsigned char current_density;  /* 0=low, 1=med, 2=high */
     unsigned char game_state;
     unsigned char selected_human;
     unsigned char zoom_level;
+    unsigned char menu_active;      /* 0=closed, 1=dropdown open */
+    unsigned char menu_selected;    /* top-level item index 0-3 */
+    signed char   menu_drop_sel;    /* dropdown highlight, -1=none */
+    int rci_demand[3];              /* [0]=R, [1]=C, [2]=I — can be negative */
+    unsigned int r_pop;             /* populated residential sub-tiles */
+    unsigned int c_pop;             /* populated commercial sub-tiles */
+    unsigned int i_pop;             /* populated industrial sub-tiles */
 } GameState;
 
 /* Road/rail tile selection table entry */
@@ -141,7 +154,21 @@ typedef struct { unsigned char art; unsigned char rot; } RoadTableEntry;
 extern const RoadTableEntry road_table[16];
 unsigned char neighbor_mask(GameState*, unsigned short, unsigned short, unsigned char);
 
+/* Mouse state */
+typedef struct {
+    unsigned short pixel_x;   /* Raw pixel position from driver */
+    unsigned short pixel_y;
+    unsigned char buttons;    /* Bit 0 = left, bit 1 = right */
+    unsigned char present;    /* 1 if mouse driver detected */
+} MouseState;
+
 /* Function Prototypes */
+
+/* Mouse Functions */
+int mouse_init(void);
+void mouse_read(MouseState* ms);
+void mouse_show(void);
+void mouse_hide(void);
 
 /* Graphics Functions */
 void init_ega(void);
@@ -151,6 +178,7 @@ void draw_tile(int screen_x, int screen_y, unsigned char tile_type);
 void draw_map(GameState* game);
 void draw_single_tile(GameState* game, unsigned short map_x, unsigned short map_y);
 void draw_tile_in_context(int screen_x, int screen_y, GameState* game, unsigned short map_x, unsigned short map_y);
+int get_tool_size(unsigned char tool);
 void draw_cursor(GameState* game);
 void draw_ui(GameState* game);
 void draw_human_view(GameState* game);
@@ -163,6 +191,26 @@ void draw_char(int x, int y, char c, unsigned char color);
 void draw_help_screen(void);
 unsigned char get_tile_color(unsigned char tile_type);
 void draw_map_zoomed(GameState* game);
+void draw_menu_bar(GameState* game);
+void draw_menu_dropdown(GameState* game);
+signed char menu_first_selectable(int menu_idx);
+signed char menu_next_selectable(int menu_idx, int cur, int dir);
+
+/* Menu system (defined in graphics.c) */
+#define MF_HEADING  1
+#define MF_DISABLED 2
+
+typedef struct {
+    const char *label;
+    unsigned char flags;
+    unsigned char tile_type;
+    unsigned char action;     /* 0=set tool, 1=help, 2=quit, 3=about, 4=noop */
+} MenuItem;
+
+extern const MenuItem *menu_items[];
+extern const int menu_counts[];
+extern const int menu_label_x[];
+#define NUM_MENUS 4
 
 /* Game Logic Functions */
 void init_game(GameState* game);
@@ -172,7 +220,9 @@ void update_buildings(GameState* game);
 void update_tile_services(GameState* game);
 void spawn_human(GameState* game, unsigned short x, unsigned short y);
 void handle_input(GameState* game);
+void handle_menu_input(GameState* game, int key, int extended);
 void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned char type);
+void bulldoze_tile(GameState* game, unsigned short x, unsigned short y);
 int get_tile_cost(unsigned char type);
 void calculate_human_activity(GameState* game, Human* human);
 const char* get_activity_name(unsigned char activity);
