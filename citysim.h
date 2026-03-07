@@ -46,6 +46,16 @@
 #define STATE_CITY_VIEW 0
 #define STATE_HUMAN_VIEW 1
 #define STATE_MENU 2
+#define STATE_ABOUT 3
+#define STATE_SPLASH 4
+
+/* Difficulty Levels */
+#define DIFFICULTY_EASY   0
+#define DIFFICULTY_MEDIUM 1
+#define DIFFICULTY_HARD   2
+
+/* Default tax rate (percent, matching Micropolis default of 7%) */
+#define DEFAULT_TAX_RATE 7
 
 /* Human Activities */
 #define ACTIVITY_SLEEPING 0
@@ -140,9 +150,12 @@ typedef struct {
     unsigned char game_state;
     unsigned char selected_human;
     unsigned char zoom_level;
+    unsigned char difficulty;       /* 0=easy, 1=medium, 2=hard */
+    unsigned char city_tax;         /* tax rate percent (default 7) */
     unsigned char menu_active;      /* 0=closed, 1=dropdown open */
     unsigned char menu_selected;    /* top-level item index 0-3 */
     signed char   menu_drop_sel;    /* dropdown highlight, -1=none */
+    unsigned long play_ticks;       /* real-time tick counter (each ~50ms) */
     int rci_demand[3];              /* [0]=R, [1]=C, [2]=I — can be negative */
     unsigned int r_pop;             /* populated residential sub-tiles */
     unsigned int c_pop;             /* populated commercial sub-tiles */
@@ -189,6 +202,9 @@ void draw_text(int x, int y, const char* text, unsigned char color);
 void draw_number(int x, int y, long num, unsigned char color);
 void draw_char(int x, int y, char c, unsigned char color);
 void draw_help_screen(void);
+void draw_about_screen(GameState* game);
+void draw_splash_screen(void);
+void draw_difficulty_screen(void);
 unsigned char get_tile_color(unsigned char tile_type);
 void draw_map_zoomed(GameState* game);
 void draw_menu_bar(GameState* game);
@@ -224,6 +240,8 @@ void handle_menu_input(GameState* game, int key, int extended);
 void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned char type);
 void bulldoze_tile(GameState* game, unsigned short x, unsigned short y);
 int get_tile_cost(unsigned char type);
+int save_game(GameState* game, const char* filename);
+int load_game(GameState* game, const char* filename);
 void calculate_human_activity(GameState* game, Human* human);
 const char* get_activity_name(unsigned char activity);
 const char* get_tile_name(unsigned char type);

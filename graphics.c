@@ -1234,6 +1234,64 @@ void draw_help_screen(void) {
     draw_text(160, 330, "Press ESC or F1 to return", COLOR_YELLOW);
 }
 
+void draw_about_screen(GameState* game) {
+    unsigned long total_secs = game->play_ticks / 20;  /* 50ms per tick = 20 ticks/sec */
+    unsigned int hours = (unsigned int)(total_secs / 3600);
+    unsigned int minutes = (unsigned int)((total_secs % 3600) / 60);
+    static const char *diff_names[] = { "Easy", "Medium", "Hard" };
+    char buf[60];
+
+    clear_screen(COLOR_BLUE);
+
+    draw_text(200, 80, "CitySim version 0.1", COLOR_WHITE);
+    draw_text(180, 120, "Written by Alistair Ross", COLOR_WHITE);
+    draw_text(160, 160, "Dedicated to Esther & Mel", COLOR_YELLOW);
+
+    sprintf(buf, "You have been playing for %u hours", hours);
+    draw_text(140, 220, buf, COLOR_LIGHT_CYAN);
+    sprintf(buf, "and %u minutes", minutes);
+    draw_text(220, 240, buf, COLOR_LIGHT_CYAN);
+
+    sprintf(buf, "Difficulty: %s  Tax rate: %u%%",
+            diff_names[game->difficulty < 3 ? game->difficulty : 1],
+            (unsigned)game->city_tax);
+    draw_text(160, 270, buf, COLOR_LIGHT_GRAY);
+
+    draw_text(180, 310, "Press any key to return", COLOR_LIGHT_GREEN);
+}
+
+void draw_splash_screen(void) {
+    clear_screen(COLOR_BLACK);
+
+    /* Title */
+    draw_text(240, 60, "C I T Y S I M", COLOR_YELLOW);
+    draw_text(200, 90, "EGA City Builder v0.1", COLOR_LIGHT_GRAY);
+
+    /* Menu options */
+    draw_text(230, 170, "1. New City", COLOR_WHITE);
+    draw_text(230, 200, "2. Load City", COLOR_WHITE);
+    draw_text(230, 230, "3. Quit", COLOR_WHITE);
+
+    draw_text(180, 310, "Press 1, 2 or 3 to choose", COLOR_LIGHT_GREEN);
+}
+
+void draw_difficulty_screen(void) {
+    clear_screen(COLOR_BLACK);
+
+    draw_text(220, 60, "SELECT DIFFICULTY", COLOR_YELLOW);
+
+    draw_text(220, 140, "1. Easy", COLOR_LIGHT_GREEN);
+    draw_text(260, 160, "More tax revenue", COLOR_LIGHT_GRAY);
+
+    draw_text(220, 200, "2. Medium", COLOR_WHITE);
+    draw_text(260, 220, "Standard gameplay", COLOR_LIGHT_GRAY);
+
+    draw_text(220, 260, "3. Hard", COLOR_LIGHT_RED);
+    draw_text(260, 280, "Less tax revenue", COLOR_LIGHT_GRAY);
+
+    draw_text(200, 320, "Press 1, 2 or 3 to choose", COLOR_LIGHT_GREEN);
+}
+
 
 void draw_ui(GameState* game) {
     /* 2x font: chars are 10x14px, 12px spacing. Bar is y=320-349 (30px). */
@@ -1290,13 +1348,15 @@ static const char *menu_labels[] = { "File", "Build", "Speed", "Options" };
 const int menu_label_x[] = { 4, 68, 144, 220 };
 static const int menu_label_w[] = { 4, 5, 5, 7 };
 
-/* CS menu */
+/* File menu */
 static const MenuItem menu_cs[] = {
     { "About CitySim",  0, 0, 3 },
     { "Help        F1", 0, 0, 1 },
+    { "Save Game",      0, 0, 5 },
+    { "Load Game",      0, 0, 6 },
     { "Quit       ^Q",  0, 0, 2 }
 };
-#define MENU_CS_COUNT 3
+#define MENU_CS_COUNT 5
 
 /* Build menu */
 static const MenuItem menu_build[] = {

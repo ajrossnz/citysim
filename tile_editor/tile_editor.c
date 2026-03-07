@@ -144,7 +144,9 @@ static int win_h = INITIAL_H;
 
 /* File paths */
 static const char *project_file = "tiles.dat";
-static const char *header_file  = "tiles.h";
+static const char *header_file = "tiles.h";
+static const char *preview_file = NULL;  /* optional extra .dat from CLI */
+static int main_tile_count = 0;          /* tiles belonging to main project */
 
 /* ------------------------------------------------------------------ */
 /* Forward declarations                                               */
@@ -153,6 +155,7 @@ static const char *header_file  = "tiles.h";
 static void save_project(void);
 static void load_project(void);
 static void export_header(void);
+static void sort_tiles(void);
 static void snapshot_undo(void);
 static void flood_fill(Tile *t, int x, int y, int old_c, int new_c);
 
@@ -494,7 +497,8 @@ static void save_project(void)
     }
 
     fprintf(f, "TILESET 1.0\n");
-    for (i = 0; i < tile_count; i++) {
+    /* Only save main project tiles, not preview tiles */
+    for (i = 0; i < main_tile_count; i++) {
         Tile *t = &tiles[i];
         fprintf(f, "TILE %s %d %d\n", t->name, t->units_w, t->units_h);
         for (y = 0; y < t->px_h; y++) {
@@ -511,24 +515,24 @@ static void save_project(void)
 
     export_header();
     unsaved = 0;
-    printf("Saved %s and %s (%d tiles)\n", project_file, header_file, tile_count);
+    printf("Saved %s and %s (%d tiles)\n", project_file, header_file, main_tile_count);
 }
 
-static void load_project(void)
+/* Load tiles from a .dat file, appending to the current tile array.
+ * Returns the number of tiles loaded. */
+static int load_file_append(const char *path)
 {
     FILE *f;
     char line[4096];
     char name[MAX_TILE_NAME];
     int uw, uh;
+    int loaded = 0;
 
-    f = fopen(project_file, "r");
-    if (!f) return;
-
-    tile_count = 0;
-    selected_tile = -1;
+    f = fopen(path, "r");
+    if (!f) return 0;
 
     /* Read header line */
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return; }
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
 
     while (fgets(line, sizeof(line), f)) {
         if (sscanf(line, "TILE %63s %d %d", name, &uw, &uh) == 3) {
@@ -565,14 +569,40 @@ static void load_project(void)
                 if (strncmp(line, "END", 3) == 0) break;
             }
             tile_count++;
+            loaded++;
         }
     }
 
     fclose(f);
+    return loaded;
+}
 
-    if (tile_count > 0) selected_tile = 0;
+static void load_project(void)
+{
+    int n;
+
+    tile_count = 0;
+    selected_tile = -1;
+
+    /* Always load the main project first */
+    n = load_file_append(project_file);
+    main_tile_count = tile_count;
+    printf("Loaded %d tiles from %s\n", n, project_file);
+
+    /* If a preview file was given, append those tiles */
+    if (preview_file) {
+        int pn = load_file_append(preview_file);
+        printf("Loaded %d preview tiles from %s\n", pn, preview_file);
+        /* Select the first preview tile so user sees it immediately */
+        if (pn > 0)
+            selected_tile = main_tile_count;
+    }
+
+    sort_tiles();
+
+    if (selected_tile < 0 && tile_count > 0)
+        selected_tile = 0;
     unsaved = 0;
-    printf("Loaded %d tiles from %s\n", tile_count, project_file);
 }
 
 static void export_header(void)
@@ -590,7 +620,8 @@ static void export_header(void)
     fprintf(f, "#ifndef TILES_H\n#define TILES_H\n\n");
     fprintf(f, "#define COLOR_TRANSPARENT 255\n\n");
 
-    for (i = 0; i < tile_count; i++) {
+    /* Only export main project tiles, not preview tiles */
+    for (i = 0; i < main_tile_count; i++) {
         Tile *t = &tiles[i];
         fprintf(f, "/* %s: %dx%d (%dx%d pixels) */\n",
                 t->name, t->units_w, t->units_h, t->px_w, t->px_h);
@@ -607,22 +638,22 @@ static void export_header(void)
         fprintf(f, "};\n\n");
     }
 
-    if (tile_count > 0) {
-        fprintf(f, "#define TILE_COUNT %d\n\n", tile_count);
+    if (main_tile_count > 0) {
+        fprintf(f, "#define TILE_COUNT %d\n\n", main_tile_count);
         fprintf(f, "static const char *tile_names[TILE_COUNT] = {");
-        for (i = 0; i < tile_count; i++) {
+        for (i = 0; i < main_tile_count; i++) {
             if (i > 0) fprintf(f, ",");
             fprintf(f, "\"%s\"", tiles[i].name);
         }
         fprintf(f, "};\n");
         fprintf(f, "static const int tile_widths[TILE_COUNT] = {");
-        for (i = 0; i < tile_count; i++) {
+        for (i = 0; i < main_tile_count; i++) {
             if (i > 0) fprintf(f, ",");
             fprintf(f, "%d", tiles[i].px_w);
         }
         fprintf(f, "};\n");
         fprintf(f, "static const int tile_heights[TILE_COUNT] = {");
-        for (i = 0; i < tile_count; i++) {
+        for (i = 0; i < main_tile_count; i++) {
             if (i > 0) fprintf(f, ",");
             fprintf(f, "%d", tiles[i].px_h);
         }
@@ -637,14 +668,75 @@ static void export_header(void)
 /* Create / delete tile helpers                                       */
 /* ------------------------------------------------------------------ */
 
+/* Sort main tiles alphabetically by name (insertion sort, stable) */
+static void sort_tiles(void)
+{
+    int i, j;
+    Tile tmp;
+    for (i = 1; i < main_tile_count; i++) {
+        memcpy(&tmp, &tiles[i], sizeof(Tile));
+        j = i - 1;
+        while (j >= 0 && strcmp(tiles[j].name, tmp.name) > 0) {
+            memcpy(&tiles[j + 1], &tiles[j], sizeof(Tile));
+            j--;
+        }
+        memcpy(&tiles[j + 1], &tmp, sizeof(Tile));
+    }
+    /* Keep selected tile pointing at something valid */
+    if (selected_tile >= 0 && selected_tile < main_tile_count) {
+        /* Try to find it by name — best effort */
+    }
+}
+
+/* Rotate the selected tile 90 degrees clockwise.
+ * Only works on square tiles (units_w == units_h). */
+static void rotate_tile_90cw(void)
+{
+    Tile *t;
+    int px, x, y;
+    static unsigned char tmp[MAX_TILE_PX][MAX_TILE_PX];
+
+    if (selected_tile < 0 || selected_tile >= tile_count) return;
+    t = &tiles[selected_tile];
+
+    if (t->px_w != t->px_h) {
+        /* Non-square: swap dimensions and rotate */
+        int new_w = t->px_h;
+        int new_h = t->px_w;
+        for (y = 0; y < t->px_h; y++)
+            for (x = 0; x < t->px_w; x++)
+                tmp[x][t->px_h - 1 - y] = t->pixels[y][x];
+        memcpy(t->pixels, tmp, sizeof(t->pixels));
+        t->px_w = new_w;
+        t->px_h = new_h;
+        /* Swap unit dimensions */
+        px = t->units_w;
+        t->units_w = t->units_h;
+        t->units_h = px;
+    } else {
+        /* Square: rotate in place */
+        px = t->px_w;
+        for (y = 0; y < px; y++)
+            for (x = 0; x < px; x++)
+                tmp[x][px - 1 - y] = t->pixels[y][x];
+        memcpy(t->pixels, tmp, sizeof(t->pixels));
+    }
+    unsaved = 1;
+}
+
 static int create_tile(const char *name, int uw, int uh)
 {
     Tile *t;
+    int j;
     if (tile_count >= MAX_TILES) return -1;
     if (uw < 1 || uw > MAX_TILE_UNITS || uh < 1 || uh > MAX_TILE_UNITS)
         return -1;
 
-    t = &tiles[tile_count];
+    /* Insert at end of main tiles (before preview tiles) */
+    for (j = tile_count; j > main_tile_count; j--)
+        memcpy(&tiles[j], &tiles[j-1], sizeof(Tile));
+
+    t = &tiles[main_tile_count];
     memset(t, 0, sizeof(*t));
     snprintf(t->name, MAX_TILE_NAME, "%s", name);
     t->units_w = uw;
@@ -653,7 +745,8 @@ static int create_tile(const char *name, int uw, int uh)
     t->px_h = uh * TILE_UNIT;
     /* pixels already zeroed by memset */
 
-    selected_tile = tile_count;
+    selected_tile = main_tile_count;
+    main_tile_count++;
     tile_count++;
     unsaved = 1;
     undo_valid = 0;
@@ -667,6 +760,8 @@ static void delete_tile(int idx)
     for (i = idx; i < tile_count - 1; i++)
         tiles[i] = tiles[i + 1];
     tile_count--;
+    if (idx < main_tile_count)
+        main_tile_count--;
     if (selected_tile >= tile_count)
         selected_tile = tile_count - 1;
     unsaved = 1;
@@ -968,7 +1063,12 @@ static void render(void)
                 r.h = TILE_LIST_ITEM_H - 2;
                 SDL_RenderFillRect(renderer, &r);
             }
-            draw_text_ui(8, iy + 4, tiles[i].name, 2, 220, 220, 220);
+            if (i >= main_tile_count) {
+                /* Preview tile: show in orange */
+                draw_text_ui(8, iy + 4, tiles[i].name, 2, 255, 180, 60);
+            } else {
+                draw_text_ui(8, iy + 4, tiles[i].name, 2, 220, 220, 220);
+            }
             /* Show tile size */
             {
                 char sz[16];
@@ -1301,7 +1401,7 @@ static void render(void)
 
         /* Keyboard shortcuts hint */
         draw_text_ui(8, win_h - STATUS_BAR_H + 26,
-                     "N:new D:draw F:fill S:sel U:dup ^D:copy Ent:move",
+                     "N:new D:draw F:fill S:sel U:dup W:rot Del:del",
                      3, 100, 100, 100);
         draw_text_ui(8, win_h - STATUS_BAR_H + 48,
                      "Z:undo M:xpm Sh+T:transp r:rename ^S:save Q:quit",
@@ -1365,6 +1465,8 @@ static int handle_events(void)
                             }
                         } else if (input_mode == INPUT_CONFIRM_DELETE) {
                             delete_tile(selected_tile);
+                            main_tile_count = tile_count;
+                            save_project();
                         } else if (input_mode == INPUT_CONFIRM_QUIT) {
                             running = 0;
                         }
@@ -1402,8 +1504,22 @@ static int handle_events(void)
                         end_input();
                     } else if (input_mode == INPUT_RENAME) {
                         if (input_len > 0 && selected_tile >= 0) {
+                            char old_name[MAX_TILE_NAME];
+                            snprintf(old_name, MAX_TILE_NAME, "%s",
+                                     tiles[selected_tile].name);
                             snprintf(tiles[selected_tile].name,
                                      MAX_TILE_NAME, "%s", input_buf);
+                            sort_tiles();
+                            /* Find tile by new name after sort */
+                            {
+                                int si;
+                                for (si = 0; si < tile_count; si++) {
+                                    if (strcmp(tiles[si].name, input_buf) == 0) {
+                                        selected_tile = si;
+                                        break;
+                                    }
+                                }
+                            }
                             unsaved = 1;
                         }
                         end_input();
@@ -1465,6 +1581,8 @@ static int handle_events(void)
                 }
                 else if (ev.key.keysym.sym == SDLK_s &&
                          (mod & KMOD_CTRL)) {
+                    /* Absorb all preview tiles into main before saving */
+                    main_tile_count = tile_count;
                     save_project();
                 }
                 else if (ev.key.keysym.sym == SDLK_n) {
@@ -1495,19 +1613,25 @@ static int handle_events(void)
                     if (selected_tile >= 0)
                         begin_input(INPUT_RENAME);
                 }
+                else if (ev.key.keysym.sym == SDLK_w) {
+                    snapshot_undo();
+                    rotate_tile_90cw();
+                }
                 else if (ev.key.keysym.sym == SDLK_u) {
-                    /* Duplicate current tile */
+                    /* Duplicate current tile into main project */
                     if (selected_tile >= 0 && tile_count < MAX_TILES) {
-                        int src_idx = selected_tile;
+                        /* Snapshot source before create_tile shifts things */
+                        Tile src_copy;
                         char dup_name[MAX_TILE_NAME];
+                        memcpy(&src_copy, &tiles[selected_tile], sizeof(Tile));
                         snprintf(dup_name, MAX_TILE_NAME, "%s_copy",
-                                 tiles[src_idx].name);
+                                 src_copy.name);
                         if (create_tile(dup_name,
-                                        tiles[src_idx].units_w,
-                                        tiles[src_idx].units_h) >= 0) {
+                                        src_copy.units_w,
+                                        src_copy.units_h) >= 0) {
                             memcpy(tiles[selected_tile].pixels,
-                                   tiles[src_idx].pixels,
-                                   sizeof(tiles[src_idx].pixels));
+                                   src_copy.pixels,
+                                   sizeof(src_copy.pixels));
                         }
                     }
                 }
@@ -1696,8 +1820,11 @@ int main(int argc, char *argv[])
 {
     int running = 1;
 
-    (void)argc;
-    (void)argv;
+    /* Optional: tile_editor [preview.dat]
+     * Always loads tiles.dat as the main project.
+     * If a preview file is given, its tiles are appended for preview.
+     * Ctrl+I imports a preview tile into the main project. */
+    if (argc >= 2) preview_file = argv[1];
 
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());

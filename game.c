@@ -127,12 +127,14 @@ void init_game(GameState* game) {
         }
     }
     
-    /* Starting funds */
+    /* Starting funds — varies by difficulty */
     game->funds = 50000;
     game->game_time = 8;  /* Start at 8 AM */
     game->game_day = 1;
     game->current_tool = TILE_RESIDENTIAL;
     game->game_state = STATE_CITY_VIEW;
+    game->difficulty = DIFFICULTY_EASY;
+    game->city_tax = DEFAULT_TAX_RATE;
     game->cursor_x = 256;
     game->cursor_y = 256;
 
@@ -781,9 +783,49 @@ void update_game(GameState* game) {
         update_humans(game);
         update_buildings(game);
         
-        /* Collect taxes every 24 hours */
+        /* Collect taxes every 24 hours (Micropolis-style formula) */
         if (game->game_time == 0) {
-            game->funds += game->population * 5;
+            /* TaxFund = (TotalPop * LVAvg / 120) * CityTax * FLevel
+             * LVAvg approximated from average zone density (0-2 mapped to 5-15).
+             * FLevel: Easy=1.4, Medium=1.2, Hard=0.8 — use fixed-point x10. */
+            static const int flevel_x10[] = { 14, 12, 8 };
+            unsigned int total_pop = game->population;
+            unsigned int zone_count = game->r_pop + game->c_pop + game->i_pop;
+            unsigned int lv_avg;
+            long tax_fund;
+            int fl;
+
+            if (zone_count > 0) {
+                /* Compute average density across populated zone tiles (0-2),
+                 * then scale to a land value range roughly 5-15 */
+                unsigned int density_sum = 0;
+                int sy, sx;
+                unsigned int zt = 0;
+                for (sy = 0; sy < MAP_HEIGHT; sy++) {
+                    for (sx = 0; sx < MAP_WIDTH; sx++) {
+                        unsigned char t = game->map[sy][sx].type;
+                        if ((t == TILE_RESIDENTIAL || t == TILE_COMMERCIAL ||
+                             t == TILE_INDUSTRIAL) &&
+                            game->map[sy][sx].population > 0) {
+                            density_sum += game->map[sy][sx].density;
+                            zt++;
+                        }
+                    }
+                }
+                /* avg density 0-2 -> lv_avg 5-15 */
+                if (zt > 0)
+                    lv_avg = 5 + (density_sum * 10) / (zt * 2);
+                else
+                    lv_avg = 5;
+            } else {
+                lv_avg = 5;
+            }
+
+            fl = flevel_x10[game->difficulty < 3 ? game->difficulty : 1];
+            /* (pop * lv / 120) * tax * flevel/10 */
+            tax_fund = ((long)total_pop * lv_avg / 120) * game->city_tax * fl / 10;
+            if (tax_fund < 0) tax_fund = 0;
+            game->funds += tax_fund;
         }
     }
 }
@@ -953,6 +995,83 @@ void place_tile(GameState* game, unsigned short x, unsigned short y, unsigned ch
     }
 }
 
+/* ---- Save / Load ---- */
+
+#define SAVE_MAGIC 0x4353  /* "CS" */
+#define SAVE_VERSION 2
+
+int save_game(GameState* game, const char* filename) {
+    FILE *f = fopen(filename, "wb");
+    unsigned short magic = SAVE_MAGIC;
+    unsigned short ver = SAVE_VERSION;
+    if (!f) return 0;
+    fwrite(&magic, sizeof(magic), 1, f);
+    fwrite(&ver, sizeof(ver), 1, f);
+    fwrite(&game->population, sizeof(game->population), 1, f);
+    fwrite(&game->num_buildings, sizeof(game->num_buildings), 1, f);
+    fwrite(&game->num_humans, sizeof(game->num_humans), 1, f);
+    fwrite(&game->funds, sizeof(game->funds), 1, f);
+    fwrite(&game->game_time, sizeof(game->game_time), 1, f);
+    fwrite(&game->game_day, sizeof(game->game_day), 1, f);
+    fwrite(&game->cursor_x, sizeof(game->cursor_x), 1, f);
+    fwrite(&game->cursor_y, sizeof(game->cursor_y), 1, f);
+    fwrite(&game->scroll_x, sizeof(game->scroll_x), 1, f);
+    fwrite(&game->scroll_y, sizeof(game->scroll_y), 1, f);
+    fwrite(&game->current_tool, sizeof(game->current_tool), 1, f);
+    fwrite(&game->current_density, sizeof(game->current_density), 1, f);
+    fwrite(&game->difficulty, sizeof(game->difficulty), 1, f);
+    fwrite(&game->city_tax, sizeof(game->city_tax), 1, f);
+    fwrite(&game->play_ticks, sizeof(game->play_ticks), 1, f);
+    fwrite(&game->rci_demand, sizeof(game->rci_demand), 1, f);
+    fwrite(&game->r_pop, sizeof(game->r_pop), 1, f);
+    fwrite(&game->c_pop, sizeof(game->c_pop), 1, f);
+    fwrite(&game->i_pop, sizeof(game->i_pop), 1, f);
+    fwrite(game->map, sizeof(game->map), 1, f);
+    fwrite(game->humans, sizeof(Human) * game->num_humans, 1, f);
+    fwrite(game->buildings, sizeof(Building) * game->num_buildings, 1, f);
+    fclose(f);
+    return 1;
+}
+
+int load_game(GameState* game, const char* filename) {
+    FILE *f = fopen(filename, "rb");
+    unsigned short magic, ver;
+    if (!f) return 0;
+    fread(&magic, sizeof(magic), 1, f);
+    fread(&ver, sizeof(ver), 1, f);
+    if (magic != SAVE_MAGIC || ver != SAVE_VERSION) {
+        fclose(f);
+        return 0;
+    }
+    fread(&game->population, sizeof(game->population), 1, f);
+    fread(&game->num_buildings, sizeof(game->num_buildings), 1, f);
+    fread(&game->num_humans, sizeof(game->num_humans), 1, f);
+    fread(&game->funds, sizeof(game->funds), 1, f);
+    fread(&game->game_time, sizeof(game->game_time), 1, f);
+    fread(&game->game_day, sizeof(game->game_day), 1, f);
+    fread(&game->cursor_x, sizeof(game->cursor_x), 1, f);
+    fread(&game->cursor_y, sizeof(game->cursor_y), 1, f);
+    fread(&game->scroll_x, sizeof(game->scroll_x), 1, f);
+    fread(&game->scroll_y, sizeof(game->scroll_y), 1, f);
+    fread(&game->current_tool, sizeof(game->current_tool), 1, f);
+    fread(&game->current_density, sizeof(game->current_density), 1, f);
+    fread(&game->difficulty, sizeof(game->difficulty), 1, f);
+    fread(&game->city_tax, sizeof(game->city_tax), 1, f);
+    fread(&game->play_ticks, sizeof(game->play_ticks), 1, f);
+    fread(&game->rci_demand, sizeof(game->rci_demand), 1, f);
+    fread(&game->r_pop, sizeof(game->r_pop), 1, f);
+    fread(&game->c_pop, sizeof(game->c_pop), 1, f);
+    fread(&game->i_pop, sizeof(game->i_pop), 1, f);
+    fread(game->map, sizeof(game->map), 1, f);
+    fread(game->humans, sizeof(Human) * game->num_humans, 1, f);
+    fread(game->buildings, sizeof(Building) * game->num_buildings, 1, f);
+    fclose(f);
+    game->game_state = STATE_CITY_VIEW;
+    game->menu_active = 0;
+    game->zoom_level = 0;
+    return 1;
+}
+
 /* Recentre scroll around cursor for the current zoom level */
 static void recentre_scroll(GameState* game) {
     int tile_px, vtx, vty;
@@ -1033,10 +1152,19 @@ void handle_menu_input(GameState* game, int key, int extended) {
                         set_text_mode();
                         exit(0);
                         break;
-                    case 3: /* About - no-op for now */
+                    case 3: /* About */
                         game->menu_active = 0;
+                        game->game_state = STATE_ABOUT;
                         break;
                     case 4: /* Noop / placeholder */
+                        break;
+                    case 5: /* Save */
+                        game->menu_active = 0;
+                        save_game(game, "CITYSIM.SAV");
+                        break;
+                    case 6: /* Load */
+                        game->menu_active = 0;
+                        load_game(game, "CITYSIM.SAV");
                         break;
                 }
             }

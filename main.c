@@ -19,11 +19,6 @@ int main(void) {
     signed char last_menu_drop_sel = -1;
     unsigned char pop_snap[VIEW_TILES_Y][VIEW_TILES_X];
     int snap_x, snap_y, pop_changed;
-    /* Initialize game */
-    init_game(&game);
-    last_funds = game.funds;
-    last_tool = game.current_tool;
-
     /* Enter graphics mode */
     init_ega();
 
@@ -31,6 +26,42 @@ int main(void) {
     has_mouse = mouse_init();
     if (has_mouse)
         mouse_hide();
+
+    /* Splash screen */
+    draw_splash_screen();
+    while (1) {
+        if (kbhit()) {
+            int sk = getch();
+            if (sk == '1') {
+                /* New city — pick difficulty */
+                init_game(&game);
+                draw_difficulty_screen();
+                while (1) {
+                    if (kbhit()) {
+                        int dk = getch();
+                        if (dk == '1') { game.difficulty = DIFFICULTY_EASY;   break; }
+                        if (dk == '2') { game.difficulty = DIFFICULTY_MEDIUM; break; }
+                        if (dk == '3') { game.difficulty = DIFFICULTY_HARD;   break; }
+                    }
+                    delay(50);
+                }
+                break;
+            } else if (sk == '2') {
+                init_game(&game);
+                if (!load_game(&game, "CITYSIM.SAV")) {
+                    /* Load failed — start new game */
+                    init_game(&game);
+                }
+                break;
+            } else if (sk == '3') {
+                set_text_mode();
+                return 0;
+            }
+        }
+        delay(50);
+    }
+    last_funds = game.funds;
+    last_tool = game.current_tool;
 
     /* Main game loop */
     while (running) {
@@ -62,6 +93,9 @@ int main(void) {
         /* Update game logic (paused while menu is open) */
         if (!game.menu_active)
             update_game(&game);
+
+        /* Track real playtime */
+        game.play_ticks++;
 
         /* Remember tile under cursor before input */
         old_tile = game.map[game.cursor_y][game.cursor_x].type;
@@ -251,30 +285,33 @@ int main(void) {
                             }
                         }
                     }
-                    if (pop_changed)
+                    if (pop_changed && !game.menu_active)
                         draw_cursor(&game);
                 }
 
                 /* Flash: 8-frame cycle. Cursor on for 0-5, off for 6-7.
-                   Redraw tiles at transitions (frame 0 = on, frame 6 = off). */
-                flash_timer++;
-                if (flash_timer >= 8) flash_timer = 0;
-                if (flash_timer == 0 || flash_timer == 6) {
-                    int sz, half, dy, dx;
-                    sz = get_tool_size(game.current_tool);
-                    half = sz / 2;
-                    for (dy = -half; dy <= half; dy++) {
-                        for (dx = -half; dx <= half; dx++) {
-                            int ry = (int)game.cursor_y + dy;
-                            int rx = (int)game.cursor_x + dx;
-                            if (ry >= 0 && ry < MAP_HEIGHT &&
-                                rx >= 0 && rx < MAP_WIDTH)
-                                draw_single_tile(&game, (unsigned short)rx,
-                                                 (unsigned short)ry);
+                   Redraw tiles at transitions (frame 0 = on, frame 6 = off).
+                   Skip entirely while menu is open to avoid obscuring it. */
+                if (!game.menu_active) {
+                    flash_timer++;
+                    if (flash_timer >= 8) flash_timer = 0;
+                    if (flash_timer == 0 || flash_timer == 6) {
+                        int sz, half, dy, dx;
+                        sz = get_tool_size(game.current_tool);
+                        half = sz / 2;
+                        for (dy = -half; dy <= half; dy++) {
+                            for (dx = -half; dx <= half; dx++) {
+                                int ry = (int)game.cursor_y + dy;
+                                int rx = (int)game.cursor_x + dx;
+                                if (ry >= 0 && ry < MAP_HEIGHT &&
+                                    rx >= 0 && rx < MAP_WIDTH)
+                                    draw_single_tile(&game, (unsigned short)rx,
+                                                     (unsigned short)ry);
+                            }
                         }
+                        if (flash_timer == 0)
+                            draw_cursor(&game);
                     }
-                    if (flash_timer == 0)
-                        draw_cursor(&game);
                 }
             }
 
@@ -333,6 +370,20 @@ int main(void) {
             }
             game.game_state = STATE_CITY_VIEW;
             first_render = 1; /* Force full redraw when returning */
+        } else if (game.game_state == STATE_ABOUT) {
+            draw_about_screen(&game);
+            /* Wait for any key to dismiss */
+            while (kbhit()) getch();
+            while (1) {
+                if (kbhit()) {
+                    int k = getch();
+                    if (k == 0 || k == 0xE0) getch(); /* consume extended */
+                    break;
+                }
+                delay(50);
+            }
+            game.game_state = STATE_CITY_VIEW;
+            first_render = 1;
         }
 
         /* Small delay to control frame rate */

@@ -1,6 +1,12 @@
 # CitySim - A City Building Simulation for DOS
 
 A SimCity-inspired city building game for 386 DOS machines with EGA graphics (16 colours, 640x350 resolution).
+There is also an SDL based tile editor to amend the graphics tiles, or create your own!
+
+![CitySim Screenshot](screenshot.png)
+
+## Development Status
+This game is still in very early development stages, the basic logic is working now, but tiles haven't all been drawn and many features don't work yet
 
 ## System Requirements
 
@@ -11,7 +17,7 @@ A SimCity-inspired city building game for 386 DOS machines with EGA graphics (16
 
 ## Building from source
 
-### Prerequisites
+### Prerequisites to build
 
 - Open Watcom C/C++ compiler
 - DOS4GW extender (included with Open Watcom, or run `get_dos4gw.sh`)
@@ -28,8 +34,9 @@ Or use the build script:
 ./build.sh
 ```
 
-### Run in DOSBox
+### Run in DOSBox or on real hardware
 
+note you need dos4gw or equivalents (run get_dos4gw.sh if you want help)
 ```bash
 dosbox dos4gw citysim.exe
 ```
@@ -121,8 +128,6 @@ Citizens follow daily routines (sleeping, eating, commuting, working, leisure) a
 
 ## Known Limitations
 
-- No save/load
-- No mouse support
 - No sound
 - Simple direct-line pathfinding (no A*)
 - Service buildings (police, fire, hospital, school) are placeable but have no gameplay mechanics yet
