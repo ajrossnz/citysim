@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <dirent.h>
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                          */
@@ -45,7 +46,8 @@ enum {
     INPUT_CONFIRM_CLEAR,
     INPUT_CONFIRM_DELETE,
     INPUT_CONFIRM_QUIT,
-    INPUT_XPM_PATH
+    INPUT_XPM_PATH,
+    INPUT_FILE_PICKER
 };
 
 /* Tools */
@@ -136,6 +138,17 @@ static int  new_tile_width = 0;
 /* Tile list scroll offset */
 static int tile_list_scroll = 0;
 
+/* File picker state */
+#define PICKER_MAX_FILES 512
+#define PICKER_DIR "micropolis"
+static char picker_files[PICKER_MAX_FILES][MAX_TILE_NAME];
+static int  picker_file_count = 0;
+static int  picker_selected = 0;
+static int  picker_scroll = 0;
+static int  picker_preview_loaded = 0;  /* 1 = preview tiles loaded for selected file */
+static int  picker_preview_start = 0;   /* tile index where picker preview tiles start */
+static int  picker_preview_count = 0;   /* number of picker preview tiles */
+
 /* Window / layout */
 static SDL_Window   *window;
 static SDL_Renderer *renderer;
@@ -158,6 +171,7 @@ static void export_header(void);
 static void sort_tiles(void);
 static void snapshot_undo(void);
 static void flood_fill(Tile *t, int x, int y, int old_c, int new_c);
+static int  load_file_append(const char *path);
 
 /* ------------------------------------------------------------------ */
 /* Layout helpers                                                     */
@@ -479,6 +493,109 @@ static void sel_stamp(int px, int py)
     float_active = 0;
     sel_active = 0;
     unsaved = 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* File picker                                                         */
+/* ------------------------------------------------------------------ */
+
+static int picker_name_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static void picker_scan_dir(void)
+{
+    DIR *d;
+    struct dirent *ent;
+    picker_file_count = 0;
+
+    d = opendir(PICKER_DIR);
+    if (!d) return;
+
+    while ((ent = readdir(d)) != NULL) {
+        int len = (int)strlen(ent->d_name);
+        if (len > 4 && strcmp(ent->d_name + len - 4, ".dat") == 0) {
+            if (picker_file_count < PICKER_MAX_FILES) {
+                snprintf(picker_files[picker_file_count], MAX_TILE_NAME,
+                         "%s", ent->d_name);
+                picker_file_count++;
+            }
+        }
+    }
+    closedir(d);
+
+    qsort(picker_files, picker_file_count, MAX_TILE_NAME, picker_name_cmp);
+    picker_selected = 0;
+    picker_scroll = 0;
+    picker_preview_loaded = 0;
+    picker_preview_count = 0;
+}
+
+/* Remove any previously loaded picker preview tiles */
+static void picker_clear_preview(void)
+{
+    if (picker_preview_count > 0) {
+        int i;
+        /* Remove tiles from picker_preview_start onwards */
+        for (i = picker_preview_start;
+             i < tile_count - picker_preview_count; i++)
+            tiles[i] = tiles[i + picker_preview_count];
+        tile_count -= picker_preview_count;
+        if (selected_tile >= picker_preview_start)
+            selected_tile = picker_preview_start > 0 ?
+                            picker_preview_start - 1 : -1;
+        picker_preview_count = 0;
+        picker_preview_loaded = 0;
+    }
+}
+
+/* Load a .dat file as picker preview tiles (appended at end) */
+static void picker_load_preview(int file_idx)
+{
+    char path[256];
+
+    picker_clear_preview();
+
+    snprintf(path, sizeof(path), "%s/%s", PICKER_DIR,
+             picker_files[file_idx]);
+
+    picker_preview_start = tile_count;
+    picker_preview_count = load_file_append(path);
+    picker_preview_loaded = (picker_preview_count > 0);
+
+    /* Select first preview tile for immediate visibility */
+    if (picker_preview_loaded)
+        selected_tile = picker_preview_start;
+}
+
+/* Confirm: load the selected file as the editor's preview tiles */
+static void picker_confirm(void)
+{
+    char path[256];
+
+    /* Clear any picker preview tiles first */
+    picker_clear_preview();
+
+    /* Also remove any previous CLI preview tiles */
+    if (tile_count > main_tile_count) {
+        tile_count = main_tile_count;
+    }
+
+    snprintf(path, sizeof(path), "%s/%s", PICKER_DIR,
+             picker_files[picker_selected]);
+
+    /* Load as preview (same as CLI preview_file behaviour) */
+    {
+        int pn = load_file_append(path);
+        printf("Loaded %d preview tiles from %s\n", pn, path);
+        if (pn > 0)
+            selected_tile = main_tile_count;
+    }
+
+    sort_tiles();
+    if (selected_tile < 0 && tile_count > 0)
+        selected_tile = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1361,6 +1478,125 @@ static void render(void)
                      150, 150, 150);
     }
 
+    /* --- File picker overlay --- */
+    if (input_mode == INPUT_FILE_PICKER) {
+        SDL_Rect cr;
+        int row_h = 20;
+        int pad = 10;
+        int px, py, pw, ph;
+        int visible, end, fi;
+
+        get_canvas_rect(&cr);
+        /* Left half: file list */
+        px = cr.x + pad;
+        py = cr.y + pad;
+        pw = cr.w / 2 - pad * 2;
+        ph = cr.h - pad * 2;
+
+        /* Dark background */
+        SDL_SetRenderDrawColor(renderer, 20, 20, 30, 255);
+        r.x = cr.x; r.y = cr.y; r.w = cr.w; r.h = cr.h;
+        SDL_RenderFillRect(renderer, &r);
+
+        /* Title */
+        draw_text_ui(px, py, "OPEN FILE (micropolis/)", 2, 255, 255, 100);
+        draw_text_ui(px, py + 18, "Up/Down:select  Enter:load  Space:preview  Esc:cancel",
+                     1, 130, 130, 130);
+        py += 36;
+        ph -= 36;
+
+        /* File list */
+        visible = ph / row_h;
+        if (visible < 1) visible = 1;
+
+        /* Keep selected item visible */
+        if (picker_selected < picker_scroll)
+            picker_scroll = picker_selected;
+        if (picker_selected >= picker_scroll + visible)
+            picker_scroll = picker_selected - visible + 1;
+
+        end = picker_scroll + visible;
+        if (end > picker_file_count) end = picker_file_count;
+
+        for (fi = picker_scroll; fi < end; fi++) {
+            int ry = py + (fi - picker_scroll) * row_h;
+            if (fi == picker_selected) {
+                SDL_SetRenderDrawColor(renderer, 50, 50, 100, 255);
+                r.x = px - 2; r.y = ry - 1; r.w = pw + 4; r.h = row_h - 1;
+                SDL_RenderFillRect(renderer, &r);
+                draw_text_ui(px, ry + 2, picker_files[fi], 2,
+                             255, 255, 255);
+            } else {
+                draw_text_ui(px, ry + 2, picker_files[fi], 2,
+                             180, 180, 180);
+            }
+        }
+
+        /* Scrollbar */
+        if (picker_file_count > visible) {
+            int sb_x = px + pw + 4;
+            int sb_h = ph;
+            int thumb_h = (visible * sb_h) / picker_file_count;
+            int thumb_y = py + (picker_scroll * sb_h) / picker_file_count;
+            if (thumb_h < 10) thumb_h = 10;
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+            r.x = sb_x; r.y = py; r.w = 6; r.h = sb_h;
+            SDL_RenderFillRect(renderer, &r);
+            SDL_SetRenderDrawColor(renderer, 140, 140, 140, 255);
+            r.x = sb_x; r.y = thumb_y; r.w = 6; r.h = thumb_h;
+            SDL_RenderFillRect(renderer, &r);
+        }
+
+        /* Right half: tile preview */
+        if (picker_preview_loaded && picker_preview_count > 0) {
+            int prev_x = cr.x + cr.w / 2 + pad;
+            int prev_y = cr.y + pad;
+            int prev_w = cr.w / 2 - pad * 2;
+            int ti, ty_off;
+
+            draw_text_ui(prev_x, prev_y, "PREVIEW:", 2, 255, 255, 100);
+            prev_y += 22;
+
+            ty_off = 0;
+            for (ti = picker_preview_start;
+                 ti < picker_preview_start + picker_preview_count; ti++) {
+                Tile *pt = &tiles[ti];
+                int pscale = 1;
+                int avail_w = prev_w;
+                int tx, tpy;
+
+                /* Scale up small tiles */
+                while (pt->px_w * (pscale + 1) <= avail_w &&
+                       pt->px_h * (pscale + 1) <= 80)
+                    pscale++;
+
+                /* Tile name */
+                draw_text_ui(prev_x, prev_y + ty_off, pt->name, 1,
+                             200, 200, 200);
+                ty_off += 10;
+
+                /* Render tile pixels */
+                for (tpy = 0; tpy < pt->px_h; tpy++) {
+                    for (tx = 0; tx < pt->px_w; tx++) {
+                        int c = pt->pixels[tpy][tx];
+                        if (c == COLOR_TRANSPARENT) continue;
+                        SDL_SetRenderDrawColor(renderer,
+                            ega_palette[c].r, ega_palette[c].g,
+                            ega_palette[c].b, 255);
+                        r.x = prev_x + tx * pscale;
+                        r.y = prev_y + ty_off + tpy * pscale;
+                        r.w = pscale;
+                        r.h = pscale;
+                        SDL_RenderFillRect(renderer, &r);
+                    }
+                }
+
+                ty_off += pt->px_h * pscale + 8;
+                if (prev_y + ty_off > cr.y + cr.h - 20) break;
+            }
+        }
+    }
+
     /* --- Status bar --- */
     SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
     r.x = 0; r.y = win_h - STATUS_BAR_H; r.w = win_w; r.h = STATUS_BAR_H;
@@ -1383,10 +1619,20 @@ static void render(void)
         case INPUT_CONFIRM_QUIT:   prompt = "Unsaved changes. Quit? (Y/N) ";
             break;
         case INPUT_XPM_PATH:       prompt = "XPM file path: "; break;
+        case INPUT_FILE_PICKER:    prompt = NULL; break;
         }
-        sprintf(status, "%s%s_", prompt, input_buf);
-        draw_text_ui(8, win_h - STATUS_BAR_H + 8, status, 2,
-                     255, 255, 100);
+        if (prompt) {
+            sprintf(status, "%s%s_", prompt, input_buf);
+            draw_text_ui(8, win_h - STATUS_BAR_H + 8, status, 2,
+                         255, 255, 100);
+        } else if (input_mode == INPUT_FILE_PICKER) {
+            sprintf(status, "File picker: %d files  |  %s",
+                    picker_file_count,
+                    picker_selected < picker_file_count ?
+                    picker_files[picker_selected] : "(none)");
+            draw_text_ui(8, win_h - STATUS_BAR_H + 8, status, 2,
+                         255, 255, 100);
+        }
     } else {
         sprintf(status, "col=%s(%d)  tool=%s  tiles=%d%s",
                 current_colour == COLOR_TRANSPARENT ? "Transp" :
@@ -1401,10 +1647,10 @@ static void render(void)
 
         /* Keyboard shortcuts hint */
         draw_text_ui(8, win_h - STATUS_BAR_H + 26,
-                     "N:new D:draw F:fill S:sel U:dup W:rot Del:del",
+                     "N:new O:open D:draw F:fill S:sel Ret:move ^D:copy U:dup W:rot Del",
                      3, 100, 100, 100);
         draw_text_ui(8, win_h - STATUS_BAR_H + 48,
-                     "Z:undo M:xpm Sh+T:transp r:rename ^S:save Q:quit",
+                     "Z:undo M:xpm Sh+T:transp R:rename ^S:save Q:quit",
                      3, 100, 100, 100);
     }
 
@@ -1474,6 +1720,45 @@ static int handle_events(void)
                     } else if (ev.key.keysym.sym == SDLK_n ||
                                ev.key.keysym.sym == SDLK_ESCAPE) {
                         end_input();
+                    }
+                    break;
+                }
+
+                /* File picker input handling */
+                if (input_mode == INPUT_FILE_PICKER) {
+                    if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                        picker_clear_preview();
+                        end_input();
+                    } else if (ev.key.keysym.sym == SDLK_UP) {
+                        if (picker_selected > 0) {
+                            picker_selected--;
+                            picker_preview_loaded = 0;
+                        }
+                    } else if (ev.key.keysym.sym == SDLK_DOWN) {
+                        if (picker_selected < picker_file_count - 1) {
+                            picker_selected++;
+                            picker_preview_loaded = 0;
+                        }
+                    } else if (ev.key.keysym.sym == SDLK_PAGEUP) {
+                        picker_selected -= 20;
+                        if (picker_selected < 0) picker_selected = 0;
+                        picker_preview_loaded = 0;
+                    } else if (ev.key.keysym.sym == SDLK_PAGEDOWN) {
+                        picker_selected += 20;
+                        if (picker_selected >= picker_file_count)
+                            picker_selected = picker_file_count - 1;
+                        picker_preview_loaded = 0;
+                    } else if (ev.key.keysym.sym == SDLK_SPACE) {
+                        /* Preview selected file */
+                        if (picker_selected < picker_file_count)
+                            picker_load_preview(picker_selected);
+                    } else if (ev.key.keysym.sym == SDLK_RETURN) {
+                        /* Confirm: load as preview tiles and close picker */
+                        if (picker_selected < picker_file_count) {
+                            picker_clear_preview();
+                            picker_confirm();
+                            end_input();
+                        }
                     }
                     break;
                 }
@@ -1588,6 +1873,10 @@ static int handle_events(void)
                 else if (ev.key.keysym.sym == SDLK_n) {
                     begin_input(INPUT_TILE_NAME);
                 }
+                else if (ev.key.keysym.sym == SDLK_o) {
+                    picker_scan_dir();
+                    begin_input(INPUT_FILE_PICKER);
+                }
                 else if (ev.key.keysym.sym == SDLK_d &&
                          !(mod & KMOD_CTRL)) {
                     current_tool = TOOL_DRAW;
@@ -1671,6 +1960,42 @@ static int handle_events(void)
             break;
 
         case SDL_MOUSEBUTTONDOWN:
+            /* File picker click handling */
+            if (input_mode == INPUT_FILE_PICKER &&
+                ev.button.button == SDL_BUTTON_LEFT) {
+                SDL_Rect cr;
+                int row_h = 20;
+                int pad = 10;
+                int list_x, list_y, list_h, visible;
+                get_canvas_rect(&cr);
+                list_x = cr.x + pad;
+                list_y = cr.y + pad + 36;
+                list_h = cr.h - pad * 2 - 36;
+                visible = list_h / row_h;
+
+                /* Click in file list area? */
+                if (ev.button.x >= list_x &&
+                    ev.button.x < list_x + cr.w / 2 - pad * 2 &&
+                    ev.button.y >= list_y &&
+                    ev.button.y < list_y + visible * row_h) {
+                    int clicked = picker_scroll +
+                                  (ev.button.y - list_y) / row_h;
+                    if (clicked >= 0 && clicked < picker_file_count) {
+                        if (clicked == picker_selected &&
+                            picker_preview_loaded) {
+                            /* Double-click same file: confirm and load */
+                            picker_clear_preview();
+                            picker_confirm();
+                            end_input();
+                        } else {
+                            picker_selected = clicked;
+                            /* Auto-preview on click */
+                            picker_load_preview(picker_selected);
+                        }
+                    }
+                }
+                break;
+            }
             if (input_mode != INPUT_NONE) break;
 
             /* Check if click is on canvas */
@@ -1800,11 +2125,23 @@ static int handle_events(void)
             break;
 
         case SDL_MOUSEWHEEL:
-            /* Scroll tile list */
-            if (ev.wheel.y > 0 && tile_list_scroll > 0)
-                tile_list_scroll--;
-            else if (ev.wheel.y < 0 && tile_list_scroll < tile_count - 1)
-                tile_list_scroll++;
+            if (input_mode == INPUT_FILE_PICKER) {
+                /* Scroll file picker */
+                if (ev.wheel.y > 0 && picker_selected > 0) {
+                    picker_selected--;
+                    picker_preview_loaded = 0;
+                } else if (ev.wheel.y < 0 &&
+                           picker_selected < picker_file_count - 1) {
+                    picker_selected++;
+                    picker_preview_loaded = 0;
+                }
+            } else {
+                /* Scroll tile list */
+                if (ev.wheel.y > 0 && tile_list_scroll > 0)
+                    tile_list_scroll--;
+                else if (ev.wheel.y < 0 && tile_list_scroll < tile_count - 1)
+                    tile_list_scroll++;
+            }
             break;
         }
     }

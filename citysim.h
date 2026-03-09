@@ -7,6 +7,7 @@
 #include <dos.h>
 #include <conio.h>
 #include <i86.h>
+#include <time.h>
 
 /* EGA Graphics Mode Constants */
 #define EGA_MODE 0x10       /* 640x350 16 colour */
@@ -41,6 +42,10 @@
 #define TILE_WATER_PUMP 13
 #define TILE_RAIL 14
 #define TILE_BULLDOZER 15  /* pseudo-tool, never stored on map */
+#define TILE_WOODS 16
+#define TILE_RIVER 17
+#define TILE_DIRT 18
+#define TILE_AIRPORT 19
 
 /* Game States */
 #define STATE_CITY_VIEW 0
@@ -48,6 +53,8 @@
 #define STATE_MENU 2
 #define STATE_ABOUT 3
 #define STATE_SPLASH 4
+#define STATE_BUDGET 5
+#define STATE_NEWSPAPER 6
 
 /* Difficulty Levels */
 #define DIFFICULTY_EASY   0
@@ -56,6 +63,12 @@
 
 /* Default tax rate (percent, matching Micropolis default of 7%) */
 #define DEFAULT_TAX_RATE 7
+
+/* Overlay flags (bitfield) */
+#define OVERLAY_NONE      0
+#define OVERLAY_POLLUTION 1
+#define OVERLAY_CRIME     2
+#define OVERLAY_POWER     4
 
 /* Human Activities */
 #define ACTIVITY_SLEEPING 0
@@ -101,6 +114,7 @@ typedef struct {
     unsigned char water;
     unsigned char development;
     unsigned char pollution;
+    unsigned char crime;
     unsigned char density;       /* 0=low, 1=med, 2=high (zones only) */
 } Tile;
 
@@ -155,11 +169,38 @@ typedef struct {
     unsigned char menu_active;      /* 0=closed, 1=dropdown open */
     unsigned char menu_selected;    /* top-level item index 0-3 */
     signed char   menu_drop_sel;    /* dropdown highlight, -1=none */
+    unsigned char game_speed;       /* 0=pause,1=slow,2=normal,3=fast,4=fastest */
+    unsigned char query_mode;       /* 1=query mode active (? key) */
+    unsigned char query_popup;      /* 1=popup currently showing */
+    unsigned char overlay_flags;    /* bitfield: OVERLAY_POLLUTION, OVERLAY_CRIME */
     unsigned long play_ticks;       /* real-time tick counter (each ~50ms) */
     int rci_demand[3];              /* [0]=R, [1]=C, [2]=I — can be negative */
     unsigned int r_pop;             /* populated residential sub-tiles */
     unsigned int c_pop;             /* populated commercial sub-tiles */
     unsigned int i_pop;             /* populated industrial sub-tiles */
+    unsigned char needs_redraw;     /* 1 = force full map redraw next frame */
+    unsigned char menu_expand;      /* bitfield: 1=R expanded, 2=C expanded, 4=I expanded */
+
+    /* Budget & department funding (percentages 0-100) */
+    unsigned char fund_police;      /* police department funding % (default 100) */
+    unsigned char fund_fire;        /* fire department funding % (default 100) */
+    unsigned char fund_health;      /* health/hospital funding % (default 100) */
+    unsigned char fund_education;   /* education funding % (default 100) */
+    unsigned char auto_budget;      /* 1=skip annual budget popup (default 1) */
+    unsigned char show_newspaper;   /* 1=show newspaper at year end (default 1) */
+
+    /* Annual accounting (computed at year end) */
+    long year_revenue;              /* tax income for last year */
+    long year_road_cost;            /* road maintenance cost */
+    long year_police_cost;          /* police department cost */
+    long year_fire_cost;            /* fire department cost */
+    long year_health_cost;          /* health department cost */
+    long year_education_cost;       /* education department cost */
+    unsigned int last_year_day;     /* game_day at last year-end processing */
+
+    /* Newspaper state */
+    unsigned char pending_budget;   /* 1=budget screen needs showing */
+    unsigned char pending_newspaper;/* 1=newspaper needs showing */
 } GameState;
 
 /* Road/rail tile selection table entry */
@@ -201,34 +242,47 @@ void draw_filled_rect(int x, int y, int width, int height, unsigned char color);
 void draw_text(int x, int y, const char* text, unsigned char color);
 void draw_number(int x, int y, long num, unsigned char color);
 void draw_char(int x, int y, char c, unsigned char color);
+void draw_query_popup(GameState* game);
+void draw_newspaper(GameState* game);
 void draw_help_screen(void);
 void draw_about_screen(GameState* game);
+void draw_budget_screen(GameState* game);
 void draw_splash_screen(void);
 void draw_difficulty_screen(void);
 unsigned char get_tile_color(unsigned char tile_type);
 void draw_map_zoomed(GameState* game);
+void draw_overlays(GameState* game);
 void draw_menu_bar(GameState* game);
 void draw_menu_dropdown(GameState* game);
-signed char menu_first_selectable(int menu_idx);
-signed char menu_next_selectable(int menu_idx, int cur, int dir);
+signed char menu_first_selectable(int menu_idx, unsigned char expand);
+signed char menu_next_selectable(int menu_idx, int cur, int dir, unsigned char expand);
+int menu_item_hidden(unsigned char flags, unsigned char expand);
 
 /* Menu system (defined in graphics.c) */
-#define MF_HEADING  1
-#define MF_DISABLED 2
+#define MF_HEADING     1
+#define MF_DISABLED    2
+#define MF_COLLAPSIBLE 4   /* selectable parent: Space/Enter toggles children */
+#define MF_CHILD_R     8   /* child of Residential (hidden when collapsed) */
+#define MF_CHILD_C    16   /* child of Commercial */
+#define MF_CHILD_I    32   /* child of Industrial */
 
 typedef struct {
     const char *label;
     unsigned char flags;
     unsigned char tile_type;
-    unsigned char action;     /* 0=set tool, 1=help, 2=quit, 3=about, 4=noop */
+    unsigned char action;     /* 0=set tool, 1=help, 2=quit, 3=about, 4=noop,
+                                 5=save, 6=load, 7=toggle overlay,
+                                 8=budget, 9=speed, 10=query,
+                                 11=toggle auto_budget, 12=toggle newspaper */
 } MenuItem;
 
 extern const MenuItem *menu_items[];
 extern const int menu_counts[];
 extern const int menu_label_x[];
-#define NUM_MENUS 4
+#define NUM_MENUS 5
 
 /* Game Logic Functions */
+void generate_terrain(GameState* game, unsigned int entropy);
 void init_game(GameState* game);
 void update_game(GameState* game);
 void update_humans(GameState* game);
@@ -249,5 +303,6 @@ const char* get_tile_name(unsigned char type);
 /* Utility Functions */
 unsigned int rand_range(unsigned int min, unsigned int max);
 void generate_name(char* name);
+void format_date(unsigned int game_day, char *buf);
 
 #endif /* CITYSIM_H */

@@ -34,6 +34,7 @@ if [ -z "$DOS4GW_FOUND" ]; then
     echo ""
     echo "Or download it from:"
     echo "  https://github.com/open-watcom/open-watcom-v2/releases"
+    echo "  The actual exe is in: bld/redist/dos4gw/dos4gw.ex0e"
     exit 1
 fi
 
@@ -44,7 +45,7 @@ if [ $? -eq 0 ]; then
     echo "Successfully copied DOS4GW.EXE to current directory"
     echo ""
     echo "You can now run the game in DOSBox:"
-    echo "  dosbox citysim.exe"
+    echo "  dosbox dos4gw citysim.exe"
     echo ""
     echo "Or copy both citysim.exe and dos4gw.exe to your DOS machine"
 else

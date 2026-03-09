@@ -10,25 +10,30 @@ typedef const unsigned char (*TileArt)[16];
  * Update this table as new tiles are created in the tile editor.
  * The index matches the TILE_xxx constants in citysim.h.
  */
-#define NUM_TILE_TYPES 15
+#define NUM_TILE_TYPES 20
 
 #if defined(TILE_COUNT) && TILE_COUNT > 0
 static TileArt tile_art_map[NUM_TILE_TYPES] = {
-    NULL,           /*  0: TILE_GRASS        */
-    NULL,           /*  1: TILE_RESIDENTIAL  */
-    NULL,           /*  2: TILE_COMMERCIAL   */
-    NULL,           /*  3: TILE_INDUSTRIAL   */
-    NULL,           /*  4: TILE_ROAD (context-aware) */
-    NULL,           /*  5: TILE_POWER_LINE   */
-    NULL,           /*  6: TILE_WATER        */
-    tile_park1,     /*  7: TILE_PARK         */
-    NULL,           /*  8: TILE_POLICE       */
-    NULL,           /*  9: TILE_FIRE         */
-    NULL,           /* 10: TILE_HOSPITAL     */
-    NULL,           /* 11: TILE_SCHOOL       */
-    NULL,           /* 12: TILE_POWER_PLANT  */
-    NULL,           /* 13: TILE_WATER_PUMP   */
-    tile_rail1,     /* 14: TILE_RAIL         */
+    NULL,                 /*  0: TILE_GRASS        */
+    NULL,                 /*  1: TILE_RESIDENTIAL  */
+    NULL,                 /*  2: TILE_COMMERCIAL   */
+    NULL,                 /*  3: TILE_INDUSTRIAL   */
+    NULL,                 /*  4: TILE_ROAD (context-aware) */
+    NULL,                 /*  5: TILE_POWER_LINE   */
+    NULL,                 /*  6: TILE_WATER        */
+    tile_park1,           /*  7: TILE_PARK         */
+    NULL,                 /*  8: TILE_POLICE       */
+    NULL,                 /*  9: TILE_FIRE         */
+    NULL,                 /* 10: TILE_HOSPITAL     */
+    NULL,                 /* 11: TILE_SCHOOL       */
+    NULL,                 /* 12: TILE_POWER_PLANT  */
+    NULL,                 /* 13: TILE_WATER_PUMP   */
+    tile_rail1,           /* 14: TILE_RAIL         */
+    NULL,                 /* 15: TILE_BULLDOZER    */
+    tile_terrain_woods,   /* 16: TILE_WOODS        */
+    tile_terrain_river,   /* 17: TILE_RIVER        */
+    tile_terrain_dirt,    /* 18: TILE_DIRT          */
+    NULL,                 /* 19: TILE_AIRPORT      */
 };
 #endif
 
@@ -662,6 +667,10 @@ static unsigned char road_neighbor_mask_ext(GameState *game,
 /*
  * Composite two 16x16 tiles: overlay non-zero pixels over base.
  */
+/* Forward declaration */
+static void draw_overlay_tile(int screen_x, int screen_y, int tile_px,
+                              unsigned char level, unsigned char color);
+
 static void composite_tiles(const unsigned char base[16][16],
                             const unsigned char overlay[16][16],
                             unsigned char out[16][16]) {
@@ -754,12 +763,42 @@ void draw_tile_in_context(int screen_x, int screen_y,
                                &tile_resunpop[0][0], 48,
                                sub_row, sub_col);
         } else {
-            /* Populated: select art by density */
+            /* Populated: select art by density with position-based variant */
             const unsigned char *art;
+            unsigned short ax = map_x - sub_col;
+            unsigned short ay = map_y - sub_row;
+            unsigned int variant = (ax * 7 + ay * 13);
             switch (game->map[map_y][map_x].density) {
-                case 0:  art = &tile_reslowden1[0][0]; break;
-                case 1:  art = &tile_resmedden1[0][0]; break;
-                default: art = &tile_reshiden1[0][0];  break;
+                case 0: {
+                    /* Low density: 10 variants (1x1 tiles drawn per sub-tile) */
+                    static const unsigned char (*lowden[])[16] = {
+                        tile_reslowden1, tile_reslowden2, tile_reslowden3,
+                        tile_reslowden4, tile_reslowden5, tile_reslowden6,
+                        tile_reslowden7, tile_reslowden8, tile_reslowden9,
+                        tile_reslowden10
+                    };
+                    /* Each sub-tile gets a different house using sub-position */
+                    unsigned int sv = (variant + sub_row * 3 + sub_col * 5) % 10;
+                    draw_tile_pixels(screen_x, screen_y, lowden[sv]);
+                    return;
+                }
+                case 1: {
+                    /* Medium density: 3x3 variants */
+                    static const unsigned char (*medden[])[48] = {
+                        &tile_resmedden2[0], &tile_resmedden3[0],
+                        &tile_resmedden5[0]
+                    };
+                    art = (const unsigned char *)medden[variant % 3];
+                } break;
+                default: {
+                    /* High density: 4 variants */
+                    switch (variant % 4) {
+                        case 0:  art = &tile_reshiden1[0][0]; break;
+                        case 1:  art = &tile_reshiden2[0][0]; break;
+                        case 2:  art = &tile_reshiden3[0][0]; break;
+                        default: art = &tile_reshiden4[0][0]; break;
+                    }
+                } break;
             }
             draw_multitile_sub(screen_x, screen_y, art, 48,
                                sub_row, sub_col);
@@ -780,7 +819,16 @@ void draw_tile_in_context(int screen_x, int screen_y,
         } else {
             const unsigned char *art;
             switch (game->map[map_y][map_x].density) {
-                case 0:  art = &tile_comlight1[0][0]; break;
+                case 0: {
+                    static const unsigned char (*comlow[])[48] = {
+                        tile_com_low_den0, tile_com_low_den1,
+                        tile_com_low_den2, tile_com_low_den3,
+                        tile_com_low_den4
+                    };
+                    unsigned short ax = map_x - sub_col;
+                    unsigned short ay = map_y - sub_row;
+                    art = (const unsigned char *)comlow[(ax * 7 + ay * 13) % 5];
+                } break;
                 case 1:  art = &tile_commed1[0][0];   break;
                 default: art = &tile_comcorp1[0][0];  break;
             }
@@ -803,13 +851,62 @@ void draw_tile_in_context(int screen_x, int screen_y,
         } else {
             const unsigned char *art;
             switch (game->map[map_y][map_x].density) {
-                case 0:  art = &tile_indagri1[0][0];  break;
+                case 0: {
+                    unsigned short ax = map_x - sub_col;
+                    unsigned short ay = map_y - sub_row;
+                    if ((ax * 7 + ay * 13) % 2)
+                        art = &tile_indagri2[0][0];
+                    else
+                        art = &tile_indagri1[0][0];
+                } break;
                 case 1:  art = &tile_indmed1[0][0];   break;
-                default: art = &tile_indheavy1[0][0]; break;
+                default: {
+                    /* Pick variant from anchor position */
+                    unsigned short ax = map_x - sub_col;
+                    unsigned short ay = map_y - sub_row;
+                    switch ((ax * 7 + ay * 13) % 4) {
+                        case 0:  art = &tile_indheavy1[0][0]; break;
+                        case 1:  art = &tile_indheavy2[0][0]; break;
+                        case 2:  art = &tile_indheavy3[0][0]; break;
+                        default: art = &tile_indheavy4[0][0]; break;
+                    }
+                } break;
             }
             draw_multitile_sub(screen_x, screen_y, art, 48,
                                sub_row, sub_col);
         }
+        return;
+    }
+
+    /* 3x3 service buildings: police, fire, hospital */
+    if (tile_type == TILE_POLICE) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        draw_multitile_sub(screen_x, screen_y,
+                           &tile_policedepartment[0][0], 48,
+                           subpos / 3, subpos % 3);
+        return;
+    }
+    if (tile_type == TILE_FIRE) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        draw_multitile_sub(screen_x, screen_y,
+                           &tile_firestation[0][0], 48,
+                           subpos / 3, subpos % 3);
+        return;
+    }
+    if (tile_type == TILE_HOSPITAL) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        draw_multitile_sub(screen_x, screen_y,
+                           &tile_hospital[0][0], 48,
+                           subpos / 3, subpos % 3);
+        return;
+    }
+
+    /* 6x6 airport */
+    if (tile_type == TILE_AIRPORT) {
+        unsigned char subpos = game->map[map_y][map_x].development;
+        draw_multitile_sub(screen_x, screen_y,
+                           &tile_airport[0][0], 96,
+                           subpos / 6, subpos % 6);
         return;
     }
 
@@ -947,6 +1044,10 @@ unsigned char get_tile_color(unsigned char tile_type) {
         case TILE_POWER_PLANT:  return COLOR_LIGHT_RED;
         case TILE_WATER_PUMP:   return COLOR_LIGHT_CYAN;
         case TILE_RAIL:         return COLOR_BROWN;
+        case TILE_WOODS:        return COLOR_GREEN;
+        case TILE_RIVER:        return COLOR_BLUE;
+        case TILE_DIRT:         return COLOR_BROWN;
+        case TILE_AIRPORT:      return COLOR_LIGHT_GRAY;
         default:                return COLOR_BLACK;
     }
 }
@@ -1043,12 +1144,160 @@ void draw_single_tile(GameState* game, unsigned short map_x, unsigned short map_
             draw_filled_rect(screen_x, screen_y, tile_px, tile_px, color);
         }
     }
+
+    /* Apply active overlays on top of the tile */
+    if (game->overlay_flags & OVERLAY_POLLUTION) {
+        unsigned char poll = game->map[map_y][map_x].pollution;
+        if (poll > 0)
+            draw_overlay_tile(screen_x, screen_y, tile_px, poll, COLOR_BROWN);
+    }
+    if (game->overlay_flags & OVERLAY_CRIME) {
+        unsigned char crime = game->map[map_y][map_x].crime;
+        if (crime > 0)
+            draw_overlay_tile(screen_x, screen_y, tile_px, crime, COLOR_RED);
+    }
+    if (game->overlay_flags & OVERLAY_POWER) {
+        unsigned char t = game->map[map_y][map_x].type;
+        if (t != TILE_GRASS && t != TILE_ROAD && t != TILE_RAIL &&
+            t != TILE_WATER) {
+            if (game->map[map_y][map_x].power)
+                draw_overlay_tile(screen_x, screen_y, tile_px,
+                                  64, COLOR_LIGHT_GREEN);
+            else
+                draw_overlay_tile(screen_x, screen_y, tile_px,
+                                  192, COLOR_LIGHT_RED);
+        }
+    }
+}
+
+/*
+ * Draw dithered overlay for a single tile at (screen_x, screen_y) with
+ * the given size (tile_px).  'level' is 0-255 intensity; colour is
+ * the EGA colour to stipple.  Uses a checkerboard bit mask so every
+ * other pixel is tinted, giving a "transparent" look on EGA hardware.
+ * Skips tiles below a threshold to keep the map readable.
+ */
+static void draw_overlay_tile(int screen_x, int screen_y, int tile_px,
+                              unsigned char level, unsigned char color) {
+    volatile unsigned char *video = (volatile unsigned char *)0xA0000;
+    int row, col;
+    int start_byte, end_byte;
+    unsigned char left_mask, right_mask, checker;
+    int offset;
+    int x2, y2;
+
+    if (level < 20) return;  /* Skip negligible values */
+
+    x2 = screen_x + tile_px;
+    y2 = screen_y + tile_px;
+    if (x2 > SCREEN_WIDTH) x2 = SCREEN_WIDTH;
+    if (y2 > SCREEN_HEIGHT) y2 = SCREEN_HEIGHT;
+    if (screen_x < 0) screen_x = 0;
+    if (screen_y < 0) screen_y = 0;
+
+    /* Set up EGA write mode 0 with Set/Reset */
+    outp(0x3CE, 0x05); outp(0x3CF, 0x00);
+    outp(0x3CE, 0x01); outp(0x3CF, 0x0F);
+    outp(0x3CE, 0x00); outp(0x3CF, color);
+
+    start_byte = screen_x / 8;
+    end_byte = (x2 - 1) / 8;
+    left_mask = 0xFF >> (screen_x % 8);
+    right_mask = (unsigned char)(0xFF << (7 - ((x2 - 1) % 8)));
+
+    for (row = screen_y; row < y2; row++) {
+        /* Checkerboard: even rows use 0xAA, odd rows use 0x55 */
+        checker = (row & 1) ? 0x55 : 0xAA;
+
+        /* Higher intensity: use all pixels instead of checkerboard */
+        if (level >= 128) checker = 0xFF;
+
+        offset = row * 80;
+        if (start_byte == end_byte) {
+            unsigned char mask = left_mask & right_mask & checker;
+            outp(0x3CE, 0x08); outp(0x3CF, mask);
+            (void)video[offset + start_byte];
+            video[offset + start_byte] = 0xFF;
+        } else {
+            outp(0x3CE, 0x08); outp(0x3CF, left_mask & checker);
+            (void)video[offset + start_byte];
+            video[offset + start_byte] = 0xFF;
+            for (col = start_byte + 1; col < end_byte; col++) {
+                outp(0x3CE, 0x08); outp(0x3CF, checker);
+                (void)video[offset + col];
+                video[offset + col] = 0xFF;
+            }
+            outp(0x3CE, 0x08); outp(0x3CF, right_mask & checker);
+            (void)video[offset + end_byte];
+            video[offset + end_byte] = 0xFF;
+        }
+    }
+
+    /* Reset EGA registers */
+    outp(0x3CE, 0x01); outp(0x3CF, 0x00);
+    outp(0x3CE, 0x08); outp(0x3CF, 0xFF);
+}
+
+/*
+ * Draw active overlays over the currently visible map area.
+ * Works at any zoom level.  Called after the map tiles are drawn.
+ */
+void draw_overlays(GameState *game) {
+    int tile_px, vtx, vty;
+    int tile_x, tile_y, map_x, map_y;
+    int screen_x, screen_y;
+
+    if (game->overlay_flags == OVERLAY_NONE) return;
+
+    tile_px = 16 >> game->zoom_level;
+    vtx = 640 / tile_px;
+    vty = (VIEW_TILES_Y * TILE_SIZE) / tile_px;
+    if (vtx > MAP_WIDTH) vtx = MAP_WIDTH;
+    if (vty > MAP_HEIGHT) vty = MAP_HEIGHT;
+
+    for (tile_y = 0; tile_y < vty && tile_y + game->scroll_y < MAP_HEIGHT; tile_y++) {
+        for (tile_x = 0; tile_x < vtx && tile_x + game->scroll_x < MAP_WIDTH; tile_x++) {
+            map_x = tile_x + game->scroll_x;
+            map_y = tile_y + game->scroll_y;
+            screen_x = tile_x * tile_px;
+            screen_y = tile_y * tile_px + MAP_Y_OFFSET;
+
+            if (game->overlay_flags & OVERLAY_POLLUTION) {
+                unsigned char poll = game->map[map_y][map_x].pollution;
+                if (poll > 0)
+                    draw_overlay_tile(screen_x, screen_y, tile_px,
+                                      poll, COLOR_BROWN);
+            }
+            if (game->overlay_flags & OVERLAY_CRIME) {
+                unsigned char crime = game->map[map_y][map_x].crime;
+                if (crime > 0)
+                    draw_overlay_tile(screen_x, screen_y, tile_px,
+                                      crime, COLOR_RED);
+            }
+            if (game->overlay_flags & OVERLAY_POWER) {
+                unsigned char t = game->map[map_y][map_x].type;
+                if (t != TILE_GRASS && t != TILE_ROAD && t != TILE_RAIL &&
+                    t != TILE_WATER && t != TILE_PARK && t != TILE_WOODS &&
+                    t != TILE_RIVER && t != TILE_DIRT) {
+                    if (game->map[map_y][map_x].power)
+                        draw_overlay_tile(screen_x, screen_y, tile_px,
+                                          64, COLOR_LIGHT_GREEN);
+                    else
+                        draw_overlay_tile(screen_x, screen_y, tile_px,
+                                          192, COLOR_LIGHT_RED);
+                }
+            }
+        }
+    }
 }
 
 int get_tool_size(unsigned char tool) {
     if (tool == TILE_RESIDENTIAL || tool == TILE_COMMERCIAL ||
-        tool == TILE_INDUSTRIAL || tool == TILE_POWER_PLANT)
+        tool == TILE_INDUSTRIAL || tool == TILE_POWER_PLANT ||
+        tool == TILE_POLICE || tool == TILE_FIRE || tool == TILE_HOSPITAL)
         return 3;
+    if (tool == TILE_AIRPORT)
+        return 6;
     return 1;
 }
 
@@ -1137,6 +1386,108 @@ void draw_cursor(GameState* game) {
         /* Tiny tiles: solid white block covering footprint */
         draw_filled_rect_play(ox, oy, total_px, total_px, COLOR_WHITE);
     }
+}
+
+void draw_query_popup(GameState* game) {
+    /* Draw a centered popup with tile info for the tile under cursor */
+    int px = 140, py = 80, pw = 360, ph = 180;
+    unsigned short cx = game->cursor_x, cy = game->cursor_y;
+    Tile *t = &game->map[cy][cx];
+    char buf[64];
+    int line_y = py + 12;
+    int pop_count = 0;
+    int r, c;
+    unsigned short ax, ay;
+    int is_zone = 0;
+
+    draw_filled_rect(px, py, pw, ph, COLOR_BLUE);
+    draw_rect(px, py, pw, ph, COLOR_WHITE);
+    draw_rect(px + 2, py + 2, pw - 4, ph - 4, COLOR_LIGHT_CYAN);
+
+    /* Title */
+    sprintf(buf, "Tile Query (%u, %u)", cx, cy);
+    draw_text(px + 10, line_y, buf, COLOR_WHITE);
+    line_y += 16;
+
+    /* Type */
+    sprintf(buf, "Type: %s", get_tile_name(t->type));
+    draw_text(px + 10, line_y, buf, COLOR_YELLOW);
+    line_y += 14;
+
+    /* For 3x3 zones, find anchor and count population */
+    if (t->type == TILE_RESIDENTIAL || t->type == TILE_COMMERCIAL ||
+        t->type == TILE_INDUSTRIAL || t->type == TILE_POWER_PLANT ||
+        t->type == TILE_POLICE || t->type == TILE_FIRE ||
+        t->type == TILE_HOSPITAL) {
+        unsigned char dev = t->development;
+        ax = cx - (dev % 3);
+        ay = cy - (dev / 3);
+        is_zone = 1;
+        if (ay + 2 < MAP_HEIGHT && ax + 2 < MAP_WIDTH) {
+            for (r = 0; r < 3; r++)
+                for (c = 0; c < 3; c++)
+                    if (game->map[ay + r][ax + c].population)
+                        pop_count++;
+        }
+    }
+
+    /* Density */
+    if (is_zone && (t->type == TILE_RESIDENTIAL || t->type == TILE_COMMERCIAL ||
+                    t->type == TILE_INDUSTRIAL)) {
+        static const char *den_names[] = { "Low", "Medium", "High" };
+        unsigned char d = t->density < 3 ? t->density : 0;
+        sprintf(buf, "Density: %s", den_names[d]);
+        draw_text(px + 10, line_y, buf, COLOR_LIGHT_GREEN);
+        line_y += 14;
+
+        sprintf(buf, "Zone pop: %d/9 tiles", pop_count);
+        draw_text(px + 10, line_y, buf, COLOR_LIGHT_GREEN);
+        line_y += 14;
+
+        if (t->type == TILE_RESIDENTIAL) {
+            unsigned int zone_pop;
+            if (pop_count == 9) zone_pop = 1000;
+            else zone_pop = (unsigned int)pop_count * 111;
+            sprintf(buf, "Residents: ~%u", zone_pop);
+            draw_text(px + 10, line_y, buf, COLOR_LIGHT_GREEN);
+            line_y += 14;
+        }
+
+        sprintf(buf, "RCI demand: R%+d C%+d I%+d",
+                game->rci_demand[0], game->rci_demand[1], game->rci_demand[2]);
+        draw_text(px + 10, line_y, buf, COLOR_LIGHT_CYAN);
+        line_y += 14;
+    }
+
+    /* Power / pollution / crime */
+    sprintf(buf, "Power: %s", t->power ? "Yes" : "No");
+    draw_text(px + 10, line_y, buf, t->power ? COLOR_LIGHT_GREEN : COLOR_LIGHT_RED);
+    line_y += 14;
+
+    sprintf(buf, "Pollution: %u  Crime: %u", t->pollution, t->crime);
+    draw_text(px + 10, line_y, buf, COLOR_LIGHT_GRAY);
+    line_y += 14;
+
+    /* Road access for zones */
+    if (is_zone && (t->type == TILE_RESIDENTIAL || t->type == TILE_COMMERCIAL ||
+                    t->type == TILE_INDUSTRIAL)) {
+        /* Check road access from anchor */
+        int has_road = 0;
+        for (r = -1; r <= 3 && !has_road; r++) {
+            for (c = -1; c <= 3 && !has_road; c++) {
+                int ny, nx;
+                if (r >= 0 && r <= 2 && c >= 0 && c <= 2) continue;
+                ny = (int)ay + r; nx = (int)ax + c;
+                if (ny >= 0 && ny < MAP_HEIGHT && nx >= 0 && nx < MAP_WIDTH)
+                    if (game->map[ny][nx].type == TILE_ROAD) has_road = 1;
+            }
+        }
+        sprintf(buf, "Road access: %s", has_road ? "Yes" : "No");
+        draw_text(px + 10, line_y, buf, has_road ? COLOR_LIGHT_GREEN : COLOR_LIGHT_RED);
+        line_y += 14;
+    }
+
+    draw_text(px + 10, py + ph - 18, "Press SPACE or ENTER to close", COLOR_DARK_GRAY);
 }
 
 void draw_help_screen(void) {
@@ -1260,6 +1611,250 @@ void draw_about_screen(GameState* game) {
     draw_text(180, 310, "Press any key to return", COLOR_LIGHT_GREEN);
 }
 
+void draw_budget_screen(GameState* game) {
+    char buf[64];
+    int y;
+
+    clear_screen(COLOR_BLUE);
+
+    draw_text(230, 10, "CITY BUDGET", COLOR_YELLOW);
+
+    /* Current funds and population */
+    sprintf(buf, "Funds: $%ld", game->funds);
+    draw_text(40, 38, buf, COLOR_WHITE);
+    sprintf(buf, "Population: %u", (unsigned)game->population);
+    draw_text(350, 38, buf, COLOR_LIGHT_CYAN);
+
+    /* Tax rate */
+    y = 64;
+    draw_filled_rect(38, y - 2, 564, 20, COLOR_BLACK);
+    sprintf(buf, "Tax Rate: %u%%", (unsigned)game->city_tax);
+    draw_text(40, y, buf, COLOR_LIGHT_GREEN);
+    draw_text(300, y, "+/- to adjust", COLOR_LIGHT_GRAY);
+
+    /* Last year's revenue & costs (if available) */
+    y = 92;
+    draw_text(40, y, "Last Year:", COLOR_YELLOW);
+    y += 18;
+    sprintf(buf, "  Tax Revenue:    $%ld", game->year_revenue);
+    draw_text(40, y, buf, COLOR_LIGHT_GREEN);
+    y += 16;
+    sprintf(buf, "  Road Maint:    -$%ld", game->year_road_cost);
+    draw_text(40, y, buf, COLOR_LIGHT_RED);
+
+    /* Department funding */
+    y += 24;
+    draw_text(40, y, "Department Funding:", COLOR_YELLOW);
+    draw_text(360, y, "1-4 select, +/- adj", COLOR_LIGHT_GRAY);
+    y += 18;
+
+    sprintf(buf, "  1. Police:     %3u%%  -$%ld",
+            (unsigned)game->fund_police, game->year_police_cost);
+    draw_text(40, y, buf, COLOR_WHITE);
+    y += 16;
+
+    sprintf(buf, "  2. Fire:       %3u%%  -$%ld",
+            (unsigned)game->fund_fire, game->year_fire_cost);
+    draw_text(40, y, buf, COLOR_WHITE);
+    y += 16;
+
+    sprintf(buf, "  3. Health:     %3u%%  -$%ld",
+            (unsigned)game->fund_health, game->year_health_cost);
+    draw_text(40, y, buf, COLOR_WHITE);
+    y += 16;
+
+    sprintf(buf, "  4. Education:  %3u%%  -$%ld",
+            (unsigned)game->fund_education, game->year_education_cost);
+    draw_text(40, y, buf, COLOR_WHITE);
+    y += 20;
+
+    /* Net */
+    {
+        long total_cost = game->year_road_cost + game->year_police_cost +
+                          game->year_fire_cost + game->year_health_cost +
+                          game->year_education_cost;
+        long net = game->year_revenue - total_cost;
+        sprintf(buf, "  Net:           $%ld", net);
+        draw_text(40, y, buf, net >= 0 ? COLOR_LIGHT_GREEN : COLOR_LIGHT_RED);
+    }
+
+    draw_text(120, 326, "ESC/Enter=close  T=tax  1-4=dept  +/-=adjust",
+              COLOR_LIGHT_GRAY);
+}
+
+void draw_newspaper(GameState* game) {
+    char buf[64];
+    char datebuf[20];
+    int y;
+    unsigned int cur_year;
+    long net;
+
+    /* Compute current year from game_day */
+    {
+        unsigned int yr = 1900;
+        unsigned int dl = game->game_day;
+        int lp, yd;
+        while (1) {
+            lp = (yr % 4 == 0 && (yr % 100 != 0 || yr % 400 == 0));
+            yd = 365 + lp;
+            if (dl < (unsigned int)yd) break;
+            dl -= yd;
+            yr++;
+        }
+        cur_year = yr;
+    }
+
+    net = game->year_revenue - game->year_road_cost -
+          game->year_police_cost - game->year_fire_cost -
+          game->year_health_cost - game->year_education_cost;
+
+    clear_screen(COLOR_WHITE);
+
+    /* Newspaper header */
+    draw_filled_rect(20, 8, 600, 24, COLOR_BLACK);
+    draw_text(120, 12, "THE SIMCITY TIMES", COLOR_WHITE);
+    format_date(game->game_day, datebuf);
+    draw_text(430, 12, datebuf, COLOR_LIGHT_GRAY);
+
+    draw_filled_rect(20, 34, 600, 2, COLOR_BLACK);
+
+    y = 44;
+
+    /* Headline based on city performance */
+    if (game->population == 0) {
+        draw_text(60, y, "GHOST TOWN: NO RESIDENTS FOUND", COLOR_BLACK);
+    } else if (game->population >= 10000) {
+        sprintf(buf, "BOOMING METROPOLIS: POP. %u", game->population);
+        draw_text(60, y, buf, COLOR_BLACK);
+    } else if (game->population >= 1000) {
+        sprintf(buf, "GROWING CITY REACHES %u RESIDENTS", game->population);
+        draw_text(60, y, buf, COLOR_BLACK);
+    } else {
+        sprintf(buf, "SMALL TOWN LIFE: POP. %u", game->population);
+        draw_text(60, y, buf, COLOR_BLACK);
+    }
+    y += 22;
+
+    draw_filled_rect(20, y, 600, 1, COLOR_DARK_GRAY);
+    y += 8;
+
+    /* Financial story */
+    if (net > 0) {
+        sprintf(buf, "City coffers swell! $%ld surplus", net);
+        draw_text(40, y, buf, COLOR_GREEN);
+    } else if (net < 0) {
+        sprintf(buf, "Budget crisis! $%ld deficit", -net);
+        draw_text(40, y, buf, COLOR_RED);
+    } else {
+        draw_text(40, y, "City breaks even on budget", COLOR_BLACK);
+    }
+    y += 18;
+
+    sprintf(buf, "Tax revenue: $%ld  Expenses: $%ld",
+            game->year_revenue,
+            game->year_road_cost + game->year_police_cost +
+            game->year_fire_cost + game->year_health_cost +
+            game->year_education_cost);
+    draw_text(40, y, buf, COLOR_DARK_GRAY);
+    y += 22;
+
+    draw_filled_rect(20, y, 600, 1, COLOR_DARK_GRAY);
+    y += 8;
+
+    /* Crime story */
+    {
+        unsigned int high_crime = 0;
+        int sy, sx;
+        for (sy = 0; sy < MAP_HEIGHT; sy += 4) {
+            for (sx = 0; sx < MAP_WIDTH; sx += 4) {
+                if (game->map[sy][sx].crime > 80)
+                    high_crime++;
+            }
+        }
+        if (high_crime > 20)
+            draw_text(40, y, "CRIME WAVE: Citizens demand action!", COLOR_RED);
+        else if (high_crime > 5)
+            draw_text(40, y, "Crime a concern in some districts", COLOR_BROWN);
+        else
+            draw_text(40, y, "Low crime rates praised by residents", COLOR_GREEN);
+    }
+    y += 22;
+
+    /* Pollution story */
+    {
+        unsigned int high_poll = 0;
+        int sy, sx;
+        for (sy = 0; sy < MAP_HEIGHT; sy += 4) {
+            for (sx = 0; sx < MAP_WIDTH; sx += 4) {
+                if (game->map[sy][sx].pollution > 80)
+                    high_poll++;
+            }
+        }
+        if (high_poll > 20)
+            draw_text(40, y, "SMOG ALERT: Air quality at all-time low", COLOR_RED);
+        else if (high_poll > 5)
+            draw_text(40, y, "Pollution levels rising, say experts", COLOR_BROWN);
+        else
+            draw_text(40, y, "Clean air: residents enjoy fresh breezes", COLOR_GREEN);
+    }
+    y += 22;
+
+    /* RCI demand story */
+    if (game->rci_demand[0] > 20)
+        draw_text(40, y, "Housing shortage! Residents seek homes", COLOR_BLUE);
+    else if (game->rci_demand[1] > 20)
+        draw_text(40, y, "Shoppers flock: more stores needed!", COLOR_BLUE);
+    else if (game->rci_demand[2] > 20)
+        draw_text(40, y, "Industry booming, workers in demand", COLOR_BLUE);
+    else if (game->rci_demand[0] < -20)
+        draw_text(40, y, "Residential glut: homes sit empty", COLOR_BROWN);
+    else
+        draw_text(40, y, "Economy stable, say local analysts", COLOR_BLACK);
+    y += 22;
+
+    /* Power story */
+    {
+        unsigned int unpowered = 0;
+        int sy, sx;
+        for (sy = 0; sy < MAP_HEIGHT; sy += 3) {
+            for (sx = 0; sx < MAP_WIDTH; sx += 3) {
+                unsigned char t = game->map[sy][sx].type;
+                if (t == TILE_RESIDENTIAL || t == TILE_COMMERCIAL ||
+                    t == TILE_INDUSTRIAL) {
+                    if (!game->map[sy][sx].power) unpowered++;
+                }
+            }
+        }
+        if (unpowered > 10)
+            draw_text(40, y, "BLACKOUTS: Power grid strained!", COLOR_RED);
+        else if (unpowered > 0)
+            draw_text(40, y, "Some areas lack power connections", COLOR_BROWN);
+        else if (game->population > 0)
+            draw_text(40, y, "Power grid running smoothly", COLOR_GREEN);
+        else
+            draw_text(40, y, "No power demand yet in empty city", COLOR_DARK_GRAY);
+    }
+    y += 22;
+
+    /* Fun random filler story */
+    {
+        unsigned int story = rand_range(0, 7);
+        switch (story) {
+            case 0: draw_text(40, y, "Dog show draws record crowds!", COLOR_BLACK); break;
+            case 1: draw_text(40, y, "Local baker wins pie contest", COLOR_BLACK); break;
+            case 2: draw_text(40, y, "New park delights children", COLOR_BLACK); break;
+            case 3: draw_text(40, y, "Mayor promises improvements", COLOR_BLACK); break;
+            case 4: draw_text(40, y, "Scientists study local birds", COLOR_BLACK); break;
+            case 5: draw_text(40, y, "Community garden flourishes", COLOR_BLACK); break;
+            case 6: draw_text(40, y, "Library launches reading program", COLOR_BLACK); break;
+            default: draw_text(40, y, "Residents enjoy sunny weather", COLOR_BLACK); break;
+        }
+    }
+
+    draw_filled_rect(20, 318, 600, 2, COLOR_BLACK);
+    draw_text(160, 326, "Press any key to continue", COLOR_DARK_GRAY);
+}
+
 void draw_splash_screen(void) {
     clear_screen(COLOR_BLACK);
 
@@ -1312,41 +1907,43 @@ void draw_ui(GameState* game) {
     sprintf(buf, "Pop:%u", (unsigned)game->population);
     draw_text_bg(120, bar_y, buf, 9, COLOR_WHITE, COLOR_BLACK);
 
-    /* Day — 8 chars max */
-    sprintf(buf, "Day:%u", (unsigned)game->game_day);
-    draw_text_bg(230, bar_y, buf, 8, COLOR_LIGHT_CYAN, COLOR_BLACK);
-
-    /* Time (HH:00) — 5 chars */
-    sprintf(buf, "%02u:00", game->game_time % 24);
-    draw_text_bg(340, bar_y, buf, 5, COLOR_LIGHT_CYAN, COLOR_BLACK);
+    /* Date + Time — 22 chars max */
+    {
+        char datebuf[20];
+        format_date(game->game_day, datebuf);
+        sprintf(buf, "%s %02u:00", datebuf, game->game_time % 24);
+        draw_text_bg(230, bar_y, buf, 22, COLOR_LIGHT_CYAN, COLOR_BLACK);
+    }
 
     /* Current tool name or zoom indicator — 11 chars max */
-    if (game->zoom_level > 0) {
+    if (game->query_mode) {
+        draw_text_bg(510, bar_y, "Query ?", 11, COLOR_LIGHT_CYAN, COLOR_BLACK);
+    } else if (game->zoom_level > 0) {
         sprintf(buf, "ZOOM %dx", 1 << game->zoom_level);
-        draw_text_bg(420, bar_y, buf, 11, COLOR_LIGHT_MAGENTA, COLOR_BLACK);
+        draw_text_bg(510, bar_y, buf, 11, COLOR_LIGHT_MAGENTA, COLOR_BLACK);
     } else if (game->current_tool == TILE_RESIDENTIAL) {
         static const char *rsuf[] = { " Low", " Med", " Hi" };
         sprintf(buf, "Res%s", rsuf[game->current_density < 3 ? game->current_density : 0]);
-        draw_text_bg(420, bar_y, buf, 11, COLOR_LIGHT_GREEN, COLOR_BLACK);
+        draw_text_bg(510, bar_y, buf, 11, COLOR_LIGHT_GREEN, COLOR_BLACK);
     } else if (game->current_tool == TILE_COMMERCIAL) {
         static const char *csuf[] = { " Light", " Med", " Corp" };
         sprintf(buf, "Com%s", csuf[game->current_density < 3 ? game->current_density : 0]);
-        draw_text_bg(420, bar_y, buf, 11, COLOR_LIGHT_GREEN, COLOR_BLACK);
+        draw_text_bg(510, bar_y, buf, 11, COLOR_LIGHT_GREEN, COLOR_BLACK);
     } else if (game->current_tool == TILE_INDUSTRIAL) {
         static const char *isuf[] = { " Agri", " Med", " Heavy" };
         sprintf(buf, "Ind%s", isuf[game->current_density < 3 ? game->current_density : 0]);
-        draw_text_bg(420, bar_y, buf, 11, COLOR_LIGHT_GREEN, COLOR_BLACK);
+        draw_text_bg(510, bar_y, buf, 11, COLOR_LIGHT_GREEN, COLOR_BLACK);
     } else {
-        draw_text_bg(420, bar_y, get_tile_name(game->current_tool),
+        draw_text_bg(510, bar_y, get_tile_name(game->current_tool),
                      11, COLOR_LIGHT_GREEN, COLOR_BLACK);
     }
 }
 
 /* ---- Menu bar definitions ---- */
 
-static const char *menu_labels[] = { "File", "Build", "Speed", "Options" };
-const int menu_label_x[] = { 4, 68, 144, 220 };
-static const int menu_label_w[] = { 4, 5, 5, 7 };
+static const char *menu_labels[] = { "File", "Build", "Speed", "View", "Options" };
+const int menu_label_x[] = { 4, 68, 144, 220, 284 };
+static const int menu_label_w[] = { 4, 5, 5, 4, 7 };
 
 /* File menu */
 static const MenuItem menu_cs[] = {
@@ -1358,58 +1955,87 @@ static const MenuItem menu_cs[] = {
 };
 #define MENU_CS_COUNT 5
 
-/* Build menu */
+/* Build menu — R/C/I have collapsible sub-items */
 static const MenuItem menu_build[] = {
-    { "Residential",     MF_HEADING, 0, 4 },
-    { "  Low Density",   0, TILE_RESIDENTIAL,              0 },
-    { "  Med Density",   0, TILE_RESIDENTIAL | (1 << 5),   0 },
-    { "  High Density",  0, TILE_RESIDENTIAL | (2 << 5),   0 },
-    { "Commercial",      MF_HEADING, 0, 4 },
-    { "  Light",         0, TILE_COMMERCIAL,               0 },
-    { "  Medium",        0, TILE_COMMERCIAL  | (1 << 5),   0 },
-    { "  Corporate",     0, TILE_COMMERCIAL  | (2 << 5),   0 },
-    { "Industrial",      MF_HEADING, 0, 4 },
-    { "  Agriculture",   0, TILE_INDUSTRIAL,               0 },
-    { "  Medium",        0, TILE_INDUSTRIAL  | (1 << 5),   0 },
-    { "  Heavy",         0, TILE_INDUSTRIAL  | (2 << 5),   0 },
+    { "Residential   R", MF_COLLAPSIBLE, TILE_RESIDENTIAL, 13 },
+    { "  Low Density",   MF_CHILD_R, TILE_RESIDENTIAL,              0 },
+    { "  Med Density",   MF_CHILD_R, TILE_RESIDENTIAL | (1 << 5),   0 },
+    { "  High Density",  MF_CHILD_R, TILE_RESIDENTIAL | (2 << 5),   0 },
+    { "Commercial    C", MF_COLLAPSIBLE, TILE_COMMERCIAL, 13 },
+    { "  Light",         MF_CHILD_C, TILE_COMMERCIAL,               0 },
+    { "  Medium",        MF_CHILD_C, TILE_COMMERCIAL  | (1 << 5),   0 },
+    { "  Corporate",     MF_CHILD_C, TILE_COMMERCIAL  | (2 << 5),   0 },
+    { "Industrial    I", MF_COLLAPSIBLE, TILE_INDUSTRIAL, 13 },
+    { "  Agriculture",   MF_CHILD_I, TILE_INDUSTRIAL,               0 },
+    { "  Medium",        MF_CHILD_I, TILE_INDUSTRIAL  | (1 << 5),   0 },
+    { "  Heavy",         MF_CHILD_I, TILE_INDUSTRIAL  | (2 << 5),   0 },
     { "Bulldozer     B", 0, TILE_BULLDOZER, 0 },
     { "Road",            0, TILE_ROAD, 0 },
     { "Rail",            0, TILE_RAIL, 0 },
     { "Power Line",      0, TILE_POWER_LINE, 0 },
     { "Park",            0, TILE_PARK, 0 },
-    { "Power Plant",     0, TILE_POWER_PLANT, 0 }
+    { "Power Plant",     0, TILE_POWER_PLANT, 0 },
+    { "Police Dept   F", 0, TILE_POLICE, 0 },
+    { "Fire Station  E", 0, TILE_FIRE, 0 },
+    { "Hospital      O", 0, TILE_HOSPITAL, 0 },
+    { "Airport       A", 0, TILE_AIRPORT, 0 }
 };
-#define MENU_BUILD_COUNT 18
+#define MENU_BUILD_COUNT 22
 
-/* Speed menu */
+/* Speed menu — tile_type stores the speed value for action 9 */
 static const MenuItem menu_speed[] = {
-    { "Coming Soon", MF_DISABLED, 0, 4 }
+    { "Pause",   0, 0, 9 },
+    { "Slow",    0, 1, 9 },
+    { "Normal",  0, 2, 9 },
+    { "Fast",    0, 3, 9 },
+    { "Fastest", 0, 4, 9 }
 };
-#define MENU_SPEED_COUNT 1
+#define MENU_SPEED_COUNT 5
+
+/* View menu — tile_type stores the overlay bit for action 7 */
+static const MenuItem menu_view[] = {
+    { "Pollution", 0, OVERLAY_POLLUTION, 7 },
+    { "Crime",     0, OVERLAY_CRIME,     7 },
+    { "Power",     0, OVERLAY_POWER,     7 }
+};
+#define MENU_VIEW_COUNT 3
 
 /* Options menu */
 static const MenuItem menu_options[] = {
-    { "Coming Soon", MF_DISABLED, 0, 4 }
+    { "Budget     F5", 0, 0, 8 },
+    { "Query       ?", 0, 0, 10 },
+    { "Auto Budget",   0, 0, 11 },
+    { "Newspaper",     0, 0, 12 }
 };
-#define MENU_OPTIONS_COUNT 1
+#define MENU_OPTIONS_COUNT 4
 
-const MenuItem *menu_items[] = { menu_cs, menu_build, menu_speed, menu_options };
-const int menu_counts[] = { MENU_CS_COUNT, MENU_BUILD_COUNT, MENU_SPEED_COUNT, MENU_OPTIONS_COUNT };
+const MenuItem *menu_items[] = { menu_cs, menu_build, menu_speed, menu_view, menu_options };
+const int menu_counts[] = { MENU_CS_COUNT, MENU_BUILD_COUNT, MENU_SPEED_COUNT, MENU_VIEW_COUNT, MENU_OPTIONS_COUNT };
+
+/* Check if a menu item is hidden (collapsed child) */
+int menu_item_hidden(unsigned char flags, unsigned char expand) {
+    if ((flags & MF_CHILD_R) && !(expand & 1)) return 1;
+    if ((flags & MF_CHILD_C) && !(expand & 2)) return 1;
+    if ((flags & MF_CHILD_I) && !(expand & 4)) return 1;
+    return 0;
+}
 
 /* Find the first selectable item in a menu */
-signed char menu_first_selectable(int menu_idx) {
+signed char menu_first_selectable(int menu_idx, unsigned char expand) {
     int i;
     const MenuItem *items = menu_items[menu_idx];
     int count = menu_counts[menu_idx];
     for (i = 0; i < count; i++) {
-        if (!(items[i].flags & (MF_HEADING | MF_DISABLED)))
-            return (signed char)i;
+        if (items[i].flags & (MF_HEADING | MF_DISABLED)) continue;
+        if (menu_item_hidden(items[i].flags, expand)) continue;
+        return (signed char)i;
     }
     return 0;
 }
 
 /* Find next selectable item (direction: +1 or -1), wrapping */
-signed char menu_next_selectable(int menu_idx, int cur, int dir) {
+signed char menu_next_selectable(int menu_idx, int cur, int dir,
+                                  unsigned char expand) {
     const MenuItem *items = menu_items[menu_idx];
     int count = menu_counts[menu_idx];
     int i = cur;
@@ -1418,9 +2044,9 @@ signed char menu_next_selectable(int menu_idx, int cur, int dir) {
         i += dir;
         if (i < 0) i = count - 1;
         if (i >= count) i = 0;
-        if (!(items[i].flags & (MF_HEADING | MF_DISABLED)))
-            return (signed char)i;
-        tries++;
+        if (items[i].flags & (MF_HEADING | MF_DISABLED)) { tries++; continue; }
+        if (menu_item_hidden(items[i].flags, expand)) { tries++; continue; }
+        return (signed char)i;
     }
     return (signed char)cur;
 }
@@ -1465,9 +2091,10 @@ void draw_menu_bar(GameState* game) {
 
 void draw_menu_dropdown(GameState* game) {
     const MenuItem *items;
-    int count, i;
+    int count, i, vis_row;
     int drop_x, drop_w, drop_h;
     int item_y;
+    int visible_count;
 
     if (!game->menu_active)
         return;
@@ -1475,18 +2102,31 @@ void draw_menu_dropdown(GameState* game) {
     items = menu_items[game->menu_selected];
     count = menu_counts[game->menu_selected];
 
+    /* Count visible items */
+    visible_count = 0;
+    for (i = 0; i < count; i++) {
+        if (!menu_item_hidden(items[i].flags, game->menu_expand))
+            visible_count++;
+    }
+
     /* Dropdown position */
     drop_x = menu_label_x[game->menu_selected];
     drop_w = 180;  /* fixed width for all dropdowns */
-    drop_h = count * 16 + 2;  /* 16px per row + 2px border */
+    drop_h = visible_count * 16 + 2;  /* 16px per row + 2px border */
 
     /* White background with black border */
     draw_filled_rect(drop_x, MENU_BAR_HEIGHT, drop_w, drop_h, COLOR_WHITE);
     draw_rect(drop_x, MENU_BAR_HEIGHT, drop_w, drop_h, COLOR_BLACK);
 
+    vis_row = 0;
     for (i = 0; i < count; i++) {
         unsigned char fg, bg;
-        item_y = MENU_BAR_HEIGHT + 1 + i * 16;
+
+        /* Skip hidden (collapsed) children */
+        if (menu_item_hidden(items[i].flags, game->menu_expand))
+            continue;
+
+        item_y = MENU_BAR_HEIGHT + 1 + vis_row * 16;
 
         if (items[i].flags & MF_HEADING) {
             fg = COLOR_DARK_GRAY;
@@ -1503,7 +2143,26 @@ void draw_menu_dropdown(GameState* game) {
             bg = COLOR_WHITE;
         }
 
-        draw_text_bg(drop_x + 4, item_y + 1, items[i].label, 14, fg, bg);
+        /* Show tick/indicator marks */
+        if ((items[i].action == 7 &&
+             (game->overlay_flags & items[i].tile_type)) ||
+            (items[i].action == 9 &&
+             items[i].tile_type == game->game_speed) ||
+            (items[i].action == 11 && game->auto_budget) ||
+            (items[i].action == 12 && game->show_newspaper)) {
+            draw_text_bg(drop_x + 4, item_y + 1, "*", 1, fg, bg);
+        } else if (items[i].flags & MF_COLLAPSIBLE) {
+            /* Show expand/collapse arrow */
+            int expanded = 0;
+            if (items[i].tile_type == TILE_RESIDENTIAL) expanded = game->menu_expand & 1;
+            else if (items[i].tile_type == TILE_COMMERCIAL) expanded = game->menu_expand & 2;
+            else if (items[i].tile_type == TILE_INDUSTRIAL) expanded = game->menu_expand & 4;
+            draw_text_bg(drop_x + 4, item_y + 1, expanded ? "-" : "+", 1, fg, bg);
+        } else {
+            draw_text_bg(drop_x + 4, item_y + 1, " ", 1, fg, bg);
+        }
+        draw_text_bg(drop_x + 16, item_y + 1, items[i].label, 13, fg, bg);
+        vis_row++;
     }
 }
 
